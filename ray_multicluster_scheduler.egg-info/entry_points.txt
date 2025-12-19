@@ -1,0 +1,2 @@
+[console_scripts]
+ray-multicluster-scheduler = ray_multicluster_scheduler.main:main

@@ -1,0 +1,155 @@
+import ray
+import logging
+from typing import Dict, Optional, Callable
+from ray_multicluster_scheduler.common.model import TaskDescription, ResourceSnapshot
+from ray_multicluster_scheduler.scheduler.policy.policy_engine import PolicyEngine
+from ray_multicluster_scheduler.scheduler.connection.connection_lifecycle import ConnectionLifecycleManager
+from ray_multicluster_scheduler.common.circuit_breaker import ClusterCircuitBreakerManager
+from ray_multicluster_scheduler.common.exception import NoHealthyClusterError, TaskSubmissionError
+
+logger = logging.getLogger(__name__)
+
+
+class Dispatcher:
+    """Handles dispatching tasks to Ray clusters based on scheduling decisions."""
+
+    def __init__(self, policy_engine: PolicyEngine, connection_manager: ConnectionLifecycleManager,
+                 circuit_breaker_manager: ClusterCircuitBreakerManager = None):
+        self.policy_engine = policy_engine
+        self.connection_manager = connection_manager
+        self.circuit_breaker_manager = circuit_breaker_manager or ClusterCircuitBreakerManager()
+
+    def dispatch_task(self, task_desc: TaskDescription, cluster_snapshots: Dict[str, ResourceSnapshot]) -> ray.ObjectRef:
+        """Schedule and submit a task to a Ray cluster."""
+        # Make scheduling decision
+        try:
+            decision = self.policy_engine.schedule(task_desc, cluster_snapshots)
+        except Exception as e:
+            logger.error(f"Failed to make scheduling decision for task {task_desc.task_id}: {e}")
+            raise NoHealthyClusterError(f"Could not schedule task {task_desc.task_id}: {e}")
+
+        if not decision.cluster_name:
+            raise NoHealthyClusterError(f"No suitable cluster found for task {task_desc.task_id}")
+
+        # Submit task to the cluster through circuit breaker
+        def submit_task_to_cluster():
+            logger.info(f"Submitting task {task_desc.task_id} to cluster {decision.cluster_name}")
+
+            # 在提交任务前，确保连接到正确的集群
+            self._connect_to_cluster(decision.cluster_name)
+
+            # Submit the task - connection should already be established
+            # We don't need to call ray.init() again since we're already connected
+
+            # 准备runtime_env配置，根据集群设置相应的home_dir环境变量
+            final_runtime_env = self._prepare_runtime_env_for_cluster(task_desc, decision.cluster_name)
+
+            if task_desc.is_actor:
+                # Submit as actor
+                actor_class = task_desc.func_or_class
+                # 如果提供了runtime_env，则使用它
+                if final_runtime_env:
+                    actor = actor_class.options(
+                        name=task_desc.name,
+                        runtime_env=final_runtime_env
+                    ).remote(*task_desc.args, **task_desc.kwargs)
+                else:
+                    actor = actor_class.options(name=task_desc.name).remote(*task_desc.args, **task_desc.kwargs)
+                return actor
+            else:
+                # Submit as remote function
+                remote_func = task_desc.func_or_class
+                # 如果提供了runtime_env，则使用它
+                if final_runtime_env:
+                    result = remote_func.options(
+                        name=task_desc.name,
+                        runtime_env=final_runtime_env
+                    ).remote(*task_desc.args, **task_desc.kwargs)
+                else:
+                    result = remote_func.options(name=task_desc.name).remote(*task_desc.args, **task_desc.kwargs)
+                return result
+
+        try:
+            future = self.circuit_breaker_manager.call_cluster(
+                decision.cluster_name,
+                submit_task_to_cluster
+            )
+            logger.info(f"Successfully submitted task {task_desc.task_id} to cluster {decision.cluster_name}")
+            return future
+
+        except Exception as e:
+            logger.error(f"Failed to submit task {task_desc.task_id} to cluster {decision.cluster_name}: {e}")
+            import traceback
+            traceback.print_exc()
+            raise TaskSubmissionError(f"Failed to submit task {task_desc.task_id} to cluster {decision.cluster_name}: {e}")
+
+    def _connect_to_cluster(self, cluster_name: str):
+        """Connect to the specified cluster."""
+        try:
+            # 获取集群元数据
+            cluster_metadata = self.connection_manager.cluster_metadata.get(cluster_name)
+            if not cluster_metadata:
+                raise TaskSubmissionError(f"Cluster metadata not found for cluster {cluster_name}")
+
+            # 连接到指定集群
+            ray_client_address = f"ray://{cluster_metadata.head_address}"
+            logger.info(f"Connecting to cluster {cluster_name} at {ray_client_address}")
+
+            # 断开当前连接（如果有的话）
+            try:
+                ray.shutdown()
+            except:
+                pass
+
+            # 连接到目标集群
+            ray.init(
+                address=ray_client_address,
+                ignore_reinit_error=True
+            )
+
+            logger.info(f"Successfully connected to cluster {cluster_name}")
+        except Exception as e:
+            logger.error(f"Failed to connect to cluster {cluster_name}: {e}")
+            raise TaskSubmissionError(f"Could not connect to cluster {cluster_name}: {e}")
+
+    def _prepare_runtime_env_for_cluster(self, task_desc: TaskDescription, cluster_name: str) -> Optional[Dict]:
+        """Prepare runtime environment with cluster-specific home_dir and conda settings."""
+        # 获取集群的home_dir和conda环境
+        cluster_metadata = self.connection_manager.cluster_metadata.get(cluster_name)
+        cluster_home_dir = cluster_metadata.home_dir if cluster_metadata else None
+        cluster_conda_env = cluster_metadata.conda if cluster_metadata else None
+
+        # 如果集群没有配置home_dir，则不设置该环境变量
+        if not cluster_home_dir:
+            logger.warning(f"Cluster {cluster_name} does not have home_dir configured")
+
+        # 如果集群没有配置conda环境，则不设置该环境变量
+        if not cluster_conda_env:
+            logger.warning(f"Cluster {cluster_name} does not have conda environment configured")
+
+        # 如果任务没有提供runtime_env，则创建一个新的
+        if task_desc.runtime_env is None:
+            runtime_env = {}
+        else:
+            # 复制现有的runtime_env配置
+            runtime_env = task_desc.runtime_env.copy()
+
+        # 当发生集群迁移时，使用目标集群的配置覆盖原有的配置
+        # 设置集群特定的home_dir环境变量
+        if cluster_home_dir:
+            # 确保env_vars存在
+            if "env_vars" not in runtime_env:
+                runtime_env["env_vars"] = {}
+
+            # 设置集群特定的home_dir环境变量（覆盖原有值）
+            runtime_env["env_vars"]["home_dir"] = cluster_home_dir
+            logger.info(f"Prepared runtime_env for cluster {cluster_name}: home_dir={cluster_home_dir}")
+
+        # 设置集群特定的conda环境（覆盖原有值）
+        # 只有当集群配置了conda环境时才进行覆盖
+        if cluster_conda_env:
+            # 不管用户是否指定了conda环境，都使用目标集群的conda环境配置
+            runtime_env["conda"] = cluster_conda_env
+            logger.info(f"Prepared runtime_env for cluster {cluster_name}: conda={cluster_conda_env}")
+
+        return runtime_env if runtime_env else None

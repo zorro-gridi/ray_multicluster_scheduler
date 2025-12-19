@@ -1,0 +1,33 @@
+# name: 集群名称
+# head_address: 集群 Head 节点地址
+# dashboard: 集群仪表板地址
+# prefer: 是否优先使用此集群（布尔值）
+# weight: 集群权重（数值）
+# tags: 集群标签
+# home_dir: 集群的home目录路径
+# conda: 集群默认使用的conda虚拟环境名
+
+clusters:
+  # CentOS cluster
+  - name: centos
+    head_address: 192.168.5.7:32546
+    dashboard: http://192.168.5.7:31591
+    prefer: false
+    weight: 1.0
+    home_dir: /home/zorro
+    conda: ts
+    tags:
+      - linux
+      - x86_64
+
+  # macOS cluster
+  - name: mac
+    head_address: 192.168.5.2:32546
+    dashboard: http://192.168.5.2:8265
+    prefer: true
+    weight: 1.2
+    home_dir: /Users/zorro
+    conda: k8s
+    tags:
+      - macos
+      - arm64

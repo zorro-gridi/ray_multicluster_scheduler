@@ -1,0 +1,76 @@
+Metadata-Version: 2.4
+Name: ray_multicluster_scheduler
+Version: 0.1.0
+Summary: A scheduler for managing tasks across multiple Ray clusters
+Home-page: https://github.com/example/ray_multicluster_scheduler
+Author: Ray Multi-Cluster Scheduler Team
+Author-email: team@ray-multicluster-scheduler.example.com
+Classifier: Development Status :: 3 - Alpha
+Classifier: Intended Audience :: Developers
+Classifier: License :: OSI Approved :: Apache Software License
+Classifier: Operating System :: OS Independent
+Classifier: Programming Language :: Python :: 3
+Classifier: Programming Language :: Python :: 3.8
+Classifier: Programming Language :: Python :: 3.9
+Classifier: Programming Language :: Python :: 3.10
+Requires-Python: >=3.8
+Description-Content-Type: text/markdown
+Requires-Dist: ray>=2.0.0
+Provides-Extra: dev
+Requires-Dist: pytest>=6.0; extra == "dev"
+Requires-Dist: pytest-cov>=2.0; extra == "dev"
+Dynamic: author
+Dynamic: author-email
+Dynamic: classifier
+Dynamic: description
+Dynamic: description-content-type
+Dynamic: home-page
+Dynamic: provides-extra
+Dynamic: requires-dist
+Dynamic: requires-python
+Dynamic: summary
+
+# Ray Multi-Cluster Scheduler
+
+A scheduler for managing tasks across multiple Ray clusters.
+
+## Overview
+
+The Ray Multi-Cluster Scheduler is designed to distribute tasks across multiple Ray clusters, providing a unified interface for submitting tasks and managing resources.
+
+## Features
+
+- Distribute tasks across multiple Ray clusters
+- Monitor cluster health and resource availability
+- Implement backpressure to prevent overwhelming clusters
+- Provide a unified interface for task submission
+
+## Installation
+
+To install the Ray Multi-Cluster Scheduler, run:
+
+```bash
+pip install ray_multicluster_scheduler
+```
+
+## Usage
+
+To start the scheduler, run:
+
+```bash
+ray-multicluster-scheduler
+```
+
+## Development
+
+To install the package in development mode, run:
+
+```bash
+pip install -e .
+```
+
+To run tests, run:
+
+```bash
+pytest
+```
