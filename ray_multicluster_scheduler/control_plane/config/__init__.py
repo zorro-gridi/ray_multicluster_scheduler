@@ -133,27 +133,8 @@ class ConfigManager:
             return clusters
 
         except Exception as e:
-            print(f"Error loading cluster configurations from {config_file}: {e}")
+            print(f"❌ Error loading cluster configurations from {config_file}: {e}")
             # Return default configuration if loading fails
-            return [
-                ClusterMetadata(
-                    name="centos",
-                    head_address="192.168.5.7:32546",
-                    dashboard="http://192.168.5.7:31591",
-                    prefer=False,
-                    weight=1.0,
-                    home_dir="/home/zorro",  # 从配置文件读取的默认值
-                    conda="ts",  # 添加conda属性
-                    tags=["linux", "x86_64"]
-                ),
-                ClusterMetadata(
-                    name="mac",
-                    head_address="192.168.5.2:32546",
-                    dashboard="http://192.168.5.2:8265",
-                    prefer=True,
-                    weight=1.2,
-                    home_dir="/Users/zorro",  # 从配置文件读取的默认值
-                    conda="k8s",  # 添加conda属性
-                    tags=["macos", "arm64"]
-                )
-            ]
+            import traceback
+            traceback.print_exe()
+            raise e
