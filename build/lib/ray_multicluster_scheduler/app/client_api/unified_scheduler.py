@@ -77,7 +77,7 @@ class UnifiedScheduler:
         try:
             # Store the config file path for later use in lazy initialization
             self.__class__._config_file_path = config_file_path
-            
+
             # Initialize components
             cluster_monitor = ClusterMonitor(config_file_path=config_file_path)
 
@@ -362,21 +362,21 @@ def get_unified_scheduler() -> UnifiedScheduler:
 def initialize_scheduler_environment(config_file_path: Optional[str] = None) -> TaskLifecycleManager:
     """
     Initialize the multicluster scheduler environment.
-    
+
     This is a convenience function that initializes the scheduler environment
     using the unified scheduler interface.
-    
+
     Args:
         config_file_path (str, optional): Path to the cluster configuration YAML file.
             If not provided, the system will attempt to locate the configuration file
             in common locations or fall back to default configuration.
-            
+
     Returns:
         TaskLifecycleManager: The initialized task lifecycle manager
-        
+
     Raises:
         Exception: If there is an error during initialization, with full traceback information
-        
+
     Example:
         >>> task_lifecycle_manager = initialize_scheduler_environment()
         >>> # With custom config file:
@@ -385,20 +385,20 @@ def initialize_scheduler_environment(config_file_path: Optional[str] = None) -> 
     try:
         scheduler = get_unified_scheduler()
         task_lifecycle_manager = scheduler.initialize_environment(config_file_path=config_file_path)
-        
+
         # 同步初始化submit_task和submit_actor模块中的调度器，确保它们使用相同的配置
         try:
             from ray_multicluster_scheduler.app.client_api.submit_task import initialize_scheduler as init_task_scheduler
             init_task_scheduler(task_lifecycle_manager)
         except Exception as e:
             logger.warning(f"Failed to initialize submit_task scheduler: {e}")
-            
+
         try:
             from ray_multicluster_scheduler.app.client_api.submit_actor import initialize_scheduler as init_actor_scheduler
             init_actor_scheduler(task_lifecycle_manager)
         except Exception as e:
             logger.warning(f"Failed to initialize submit_actor scheduler: {e}")
-        
+
         return task_lifecycle_manager
     except Exception as e:
         logger.error(f"Failed to initialize scheduler environment: {e}")

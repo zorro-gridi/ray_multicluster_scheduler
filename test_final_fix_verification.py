@@ -11,7 +11,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '.'))
 
 import ray
 from ray_multicluster_scheduler.app.client_api.unified_scheduler import (
-    initialize_scheduler_environment, 
+    initialize_scheduler_environment,
     submit_task
 )
 
@@ -24,7 +24,7 @@ def test_function(x, y):
 def test_user_specified_config_fix():
     """Test that scheduler uses user-specified cluster configuration and fix is working."""
     print("=== Final Test: User-Specified Cluster Configuration Fix ===")
-    
+
     # 1. Initialize scheduler with user-specified config file
     print("\n1. Initializing scheduler with user-specified mac-only config...")
     try:
@@ -35,7 +35,7 @@ def test_user_specified_config_fix():
         import traceback
         traceback.print_exc()
         return False
-    
+
     # 2. Test submit_task with preferred cluster 'mac'
     print("\n2. Testing submit_task with preferred cluster 'mac'...")
     print("   If fix is working, it should NOT show 'Lazy initializing scheduler with default configuration'")

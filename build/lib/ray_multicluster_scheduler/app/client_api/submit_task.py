@@ -29,18 +29,18 @@ def initialize_scheduler(task_lifecycle_manager: Any):
 def _ensure_scheduler_initialized():
     """Ensure the scheduler is initialized, using lazy initialization if needed."""
     global _task_lifecycle_manager, _initialization_attempted
-    
+
     # 如果调度器已经初始化，直接返回
     if _task_lifecycle_manager is not None:
         return
-        
+
     # 如果已经尝试过初始化但失败了，不再尝试
     if _initialization_attempted:
         raise RuntimeError("Scheduler initialization previously failed. Call initialize_scheduler_environment() first.")
-        
+
     # 标记已尝试初始化
     _initialization_attempted = True
-    
+
     # 惰性初始化：使用默认配置初始化调度器
     logger.info("Lazy initializing scheduler with default configuration...")
     from ray_multicluster_scheduler.app.client_api.unified_scheduler import initialize_scheduler_environment
