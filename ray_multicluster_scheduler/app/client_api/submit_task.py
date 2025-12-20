@@ -66,7 +66,11 @@ def submit_task(func: Callable, args: tuple = (), kwargs: dict = None,
 
     Returns:
         A tuple containing (task_id, result) where task_id is the unique identifier
-        for the submitted task and result is the execution result.
+        for the submitted task and result is the task result.
+        
+    Note:
+        This function now supports concurrent task submissions. Multiple tasks can be 
+        submitted simultaneously without interfering with each other.
 
     Raises:
         Exception: If the scheduler is not initialized or task submission fails
@@ -99,7 +103,7 @@ def submit_task(func: Callable, args: tuple = (), kwargs: dict = None,
         resource_requirements=resource_requirements,
         tags=tags,
         is_actor=False,
-        preferred_cluster=preferred_cluster  # 新增：传递首选集群名称
+        preferred_cluster=preferred_cluster
         # 注意：已移除runtime_env参数
     )
 
@@ -107,22 +111,14 @@ def submit_task(func: Callable, args: tuple = (), kwargs: dict = None,
     future = _task_lifecycle_manager.submit_task_and_get_future(task_desc)
 
     if future is None:
-        import traceback
-        traceback.print_exc()
         raise RuntimeError(f"Failed to submit task {task_desc.task_id}")
 
     logger.info(f"Submitted task {task_desc.task_id} to scheduler")
 
-    # 等待并返回任务结果
-    try:
-        result = ray.get(future)
-        logger.info(f"Task {task_desc.task_id} completed with result: {result}")
-        # 存储任务结果供后续查询
-        _task_results[task_desc.task_id] = result
-        return task_desc.task_id, result
-    except Exception as e:
-        logger.error(f"Task {task_desc.task_id} failed with error: {e}")
-        raise RuntimeError(f"Task {task_desc.task_id} failed: {e}")
+    # 对于普通任务，future是任务结果本身，不需要调用ray.get()
+    # 存储任务结果供后续查询
+    _task_results[task_desc.task_id] = future
+    return task_desc.task_id, future
 
 
 def get_task_result(task_id: str) -> Any:
@@ -133,7 +129,7 @@ def get_task_result(task_id: str) -> Any:
         task_id: The ID of the task to get result for
 
     Returns:
-        The result of the task execution, or None if task not found or not completed
+        The task result, or None if task not found or not completed
     """
     global _task_results
     return _task_results.get(task_id)
