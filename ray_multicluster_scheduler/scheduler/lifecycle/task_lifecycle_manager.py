@@ -116,9 +116,13 @@ class TaskLifecycleManager:
             # Make scheduling decision
             decision = self.policy_engine.schedule(task_desc, cluster_snapshots)
 
+            # 如果决策返回空集群名称，说明任务需要排队
             if not decision or not decision.cluster_name:
-                logger.error(f"没有可用集群处理任务 {task_desc.task_id}")
-                return None
+                logger.info(f"任务 {task_desc.task_id} 需要排队等待资源释放")
+                # 将任务加入队列
+                self.queued_tasks.append(task_desc)
+                self.task_queue.enqueue(task_desc)
+                return task_desc.task_id
 
             logger.info(f"任务 {task_desc.task_id} 调度到集群 {decision.cluster_name}")
             # 实际调度任务到选定的集群
@@ -135,7 +139,8 @@ class TaskLifecycleManager:
             traceback.print_exc()
             # Even on error, we can try to queue the task for later retry
             self.queued_tasks.append(task_desc)  # Track queued tasks
-            return self.task_queue.enqueue(task_desc)
+            self.task_queue.enqueue(task_desc)
+            return task_desc.task_id
 
     def submit_task_and_get_future(self, task_desc: TaskDescription) -> Optional[Any]:
         """Submit a task and return a future for the result."""
@@ -156,8 +161,12 @@ class TaskLifecycleManager:
             # Make scheduling decision
             decision = self.policy_engine.schedule(task_desc, cluster_snapshots)
 
+            # 如果决策返回空集群名称，说明任务需要排队
             if not decision or not decision.cluster_name:
-                logger.error(f"没有可用集群处理任务 {task_desc.task_id}")
+                logger.info(f"任务 {task_desc.task_id} 需要排队等待资源释放")
+                # 将任务加入队列
+                self.queued_tasks.append(task_desc)
+                self.task_queue.enqueue(task_desc)
                 return None
 
             logger.info(f"任务 {task_desc.task_id} 调度到集群 {decision.cluster_name}")
@@ -169,6 +178,9 @@ class TaskLifecycleManager:
             logger.error(f"任务 {task_desc.task_id} 提交失败: {e}")
             import traceback
             traceback.print_exc()
+            # 将任务加入队列以便稍后重试
+            self.queued_tasks.append(task_desc)
+            self.task_queue.enqueue(task_desc)
             return None
 
     def _worker_loop(self):
@@ -292,6 +304,7 @@ class TaskLifecycleManager:
             # Make scheduling decision
             decision = self.policy_engine.schedule(task_desc, cluster_snapshots)
 
+            # 如果决策返回空集群名称，说明任务仍需要排队
             if not decision or not decision.cluster_name:
                 # If no cluster is available, re-enqueue the task
                 logger.warning(f"没有可用集群处理任务 {task_desc.task_id}，重新加入队列")

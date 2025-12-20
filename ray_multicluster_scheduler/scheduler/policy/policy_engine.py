@@ -1,6 +1,4 @@
-"""
-Policy engine for combining multiple scheduling policies.
-"""
+"""Policy engine for combining multiple scheduling policies."""
 
 from typing import Dict, List, Optional
 from ray_multicluster_scheduler.common.model import TaskDescription, SchedulingDecision, ResourceSnapshot, ClusterMetadata
@@ -14,6 +12,9 @@ logger = get_logger(__name__)
 
 class PolicyEngine:
     """Engine for evaluating and combining multiple scheduling policies."""
+
+    # 定义资源使用率阈值，超过此阈值时任务将进入队列等待
+    RESOURCE_THRESHOLD = 0.8  # 80%
 
     def __init__(self, cluster_monitor=None):
         self.cluster_monitor = cluster_monitor
@@ -60,13 +61,19 @@ class PolicyEngine:
                 gpu_available = snapshot.available_resources.get("GPU", 0)
                 gpu_total = snapshot.total_resources.get("GPU", 0)
 
-                # 检查资源使用率是否超过80%
+                # 检查资源使用率是否超过阈值
                 cpu_utilization = (cpu_total - cpu_available) / cpu_total if cpu_total > 0 else 0
                 gpu_utilization = (gpu_total - gpu_available) / gpu_total if gpu_total > 0 else 0
 
-                if cpu_utilization > 0.8 or gpu_utilization > 0.8:
-                    logger.warning(f"用户指定的首选集群 {task_desc.preferred_cluster} 资源使用率超过80% "
-                                 f"(CPU: {cpu_utilization:.2f}, GPU: {gpu_utilization:.2f})，回退到负载均衡调度")
+                if cpu_utilization > self.RESOURCE_THRESHOLD or gpu_utilization > self.RESOURCE_THRESHOLD:
+                    logger.warning(f"用户指定的首选集群 {task_desc.preferred_cluster} 资源使用率超过阈值 "
+                                 f"(CPU: {cpu_utilization:.2f}, GPU: {gpu_utilization:.2f})，任务将进入队列等待")
+                    # 返回空决策，表示任务需要排队
+                    return SchedulingDecision(
+                        task_id=task_desc.task_id,
+                        cluster_name="",
+                        reason=f"首选集群 {task_desc.preferred_cluster} 资源使用率超过阈值，任务进入队列等待"
+                    )
                 else:
                     logger.info(f"任务 {task_desc.task_id} 将调度到用户指定的首选集群 [{task_desc.preferred_cluster}]: "
                                f"可用资源 - CPU: {cpu_available}, GPU: {gpu_available}")
@@ -83,6 +90,33 @@ class PolicyEngine:
             logger.info(f"未指定首选集群，使用负载均衡策略选择最优集群")
 
         # Rule 2: When preferred_cluster is not specified or unavailable, use load balancing
+        # 检查所有集群的资源使用率是否都超过阈值
+        all_clusters_over_threshold = True
+        available_clusters = []
+
+        for cluster_name, snapshot in cluster_snapshots.items():
+            cpu_available = snapshot.available_resources.get("CPU", 0)
+            cpu_total = snapshot.total_resources.get("CPU", 0)
+            gpu_available = snapshot.available_resources.get("GPU", 0)
+            gpu_total = snapshot.total_resources.get("GPU", 0)
+
+            # 检查资源使用率是否超过阈值
+            cpu_utilization = (cpu_total - cpu_available) / cpu_total if cpu_total > 0 else 0
+            gpu_utilization = (gpu_total - gpu_available) / gpu_total if gpu_total > 0 else 0
+
+            if cpu_utilization <= self.RESOURCE_THRESHOLD and gpu_utilization <= self.RESOURCE_THRESHOLD:
+                all_clusters_over_threshold = False
+                available_clusters.append(cluster_name)
+
+        # 如果所有集群都超过阈值，则任务进入队列
+        if all_clusters_over_threshold and cluster_snapshots:
+            logger.warning(f"所有集群资源使用率都超过阈值，任务 {task_desc.task_id} 将进入队列等待")
+            return SchedulingDecision(
+                task_id=task_desc.task_id,
+                cluster_name="",
+                reason="所有集群资源使用率都超过阈值，任务进入队列等待"
+            )
+
         # Collect decisions from all policies
         policy_decisions = []
 
