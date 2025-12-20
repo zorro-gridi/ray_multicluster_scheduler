@@ -36,14 +36,14 @@ class ConcurrentActor:
         self.actor_id = actor_id
         self.name = name
         logger.info(f"ConcurrentActor {self.actor_id} ({self.name}) 初始化完成")
-    
+
     def process_task(self, task_name, duration=None):
         """
         处理任务
         """
         if duration is None:
             duration = random.uniform(1, 3)  # 1-3秒随机时间
-            
+
         logger.info(f"Actor {self.actor_id} 开始处理任务: {task_name} (预计耗时: {duration:.1f}s)")
         time.sleep(duration)
         result = {
@@ -62,26 +62,26 @@ def concurrent_actor_test():
     """
     logger.info("=== 开始并发Actor测试 ===")
     task_lifecycle_manager = None
-    
+
     try:
         # 1. 初始化调度器环境
         logger.info("1. 初始化调度器环境...")
         task_lifecycle_manager = initialize_scheduler_environment()
         logger.info("✅ 调度器环境初始化完成")
-        
+
         # 2. 提交多个Actor并立即执行任务
         logger.info("2. 提交Actor并执行任务...")
         task_refs = []
-        
+
         # 提交3个Actor并立即执行任务，避免Actor句柄失效
         actor_configs = [
             {"name": "actor_1", "preferred_cluster": "mac"},
             {"name": "actor_2", "preferred_cluster": "centos"},
             {"name": "actor_3", "preferred_cluster": None}  # 让调度器自动选择
         ]
-        
+
         actor_handles = []
-        
+
         for i, config in enumerate(actor_configs):
             try:
                 actor_id, actor_handle = submit_actor(
@@ -94,7 +94,7 @@ def concurrent_actor_test():
                 )
                 actor_handles.append(actor_handle)
                 logger.info(f"✅ Actor {config['name']} 提交成功: {actor_id}")
-                
+
                 # 立即执行任务，避免Actor句柄失效
                 for task_num in range(2):
                     task_name = f"{config['name']}_task_{task_num+1}"
@@ -107,15 +107,15 @@ def concurrent_actor_test():
                         'task_name': task_name
                     })
                     logger.info(f"🚀 启动任务: {task_name} (Actor: {config['name']})")
-                    
+
             except Exception as e:
                 logger.error(f"❌ 提交Actor {config['name']} 失败: {e}")
-        
+
         # 3. 等待所有任务完成
         logger.info(f"3. 等待 {len(task_refs)} 个任务完成...")
         results = []
         failed_tasks = 0
-        
+
         # 分批获取结果
         for task_info in task_refs:
             try:
@@ -125,16 +125,16 @@ def concurrent_actor_test():
             except Exception as e:
                 logger.error(f"❌ 任务失败: {task_info['task_name']} (Actor: {task_info['actor_name']}) - {e}")
                 failed_tasks += 1
-        
+
         logger.info(f"🎉 任务执行完成! 成功: {len(results)}, 失败: {failed_tasks}")
-        
+
         # 4. 清理资源
         logger.info("4. 清理资源...")
         if task_lifecycle_manager and hasattr(task_lifecycle_manager, 'stop'):
             logger.info("🛑 停止任务生命周期管理器...")
             task_lifecycle_manager.stop()
             logger.info("✅ 任务生命周期管理器已停止")
-        
+
         # 强制关闭Ray连接
         try:
             logger.info("🔌 关闭Ray连接...")
@@ -142,10 +142,10 @@ def concurrent_actor_test():
             logger.info("✅ Ray连接已关闭")
         except Exception as e:
             logger.warning(f"⚠️ 关闭Ray连接时出错: {e}")
-        
+
         logger.info("✅ 并发Actor测试完成")
         return len(results) > 0, task_lifecycle_manager
-        
+
     except Exception as e:
         logger.error(f"❌ 并发Actor测试出错: {e}")
         import traceback
@@ -159,9 +159,9 @@ def cleanup_and_exit(task_lifecycle_manager=None):
     try:
         import gc
         import ray
-        
+
         logger.info("🧹 开始清理资源...")
-        
+
         # 停止调度器
         try:
             if task_lifecycle_manager and hasattr(task_lifecycle_manager, 'stop'):
@@ -170,7 +170,7 @@ def cleanup_and_exit(task_lifecycle_manager=None):
                 logger.info("✅ 任务生命周期管理器已停止")
         except Exception as e:
             logger.warning(f"⚠️ 停止任务生命周期管理器时出错: {e}")
-        
+
         # 关闭Ray连接
         try:
             logger.info("🔌 关闭Ray连接...")
@@ -178,7 +178,7 @@ def cleanup_and_exit(task_lifecycle_manager=None):
             logger.info("✅ Ray连接已关闭")
         except Exception as e:
             logger.warning(f"⚠️ 关闭Ray连接时出错: {e}")
-        
+
         # 强制垃圾回收
         try:
             logger.info("🗑️ 执行垃圾回收...")
@@ -186,44 +186,44 @@ def cleanup_and_exit(task_lifecycle_manager=None):
             logger.info("✅ 垃圾回收完成")
         except Exception as e:
             logger.warning(f"⚠️ 垃圾回收时出错: {e}")
-            
+
         logger.info("✅ 资源清理完成")
-        
+
     except Exception as e:
         logger.error(f"❌ 资源清理过程中出错: {e}")
 
 if __name__ == "__main__":
     logger.info("🚀 开始并发Actor测试...")
-    
+
     try:
         # 设置超时
         import signal
-        
+
         def timeout_handler(signum, frame):
             logger.error("⏰ 测试超时")
             cleanup_and_exit()
             import os
             os._exit(1)
-        
+
         signal.signal(signal.SIGALRM, timeout_handler)
         signal.alarm(120)  # 2分钟超时
-        
+
         # 执行测试
         success, task_lifecycle_manager = concurrent_actor_test()
-        
+
         # 取消超时
         signal.alarm(0)
-        
+
         # 清理资源
         cleanup_and_exit(task_lifecycle_manager)
-        
+
         if success:
             logger.info("🎉 并发Actor测试通过")
             sys.exit(0)
         else:
             logger.error("💥 并发Actor测试失败")
             sys.exit(1)
-            
+
     except KeyboardInterrupt:
         logger.info("⚠️ 用户中断程序")
         cleanup_and_exit()

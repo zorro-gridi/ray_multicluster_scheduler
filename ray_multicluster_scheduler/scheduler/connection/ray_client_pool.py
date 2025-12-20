@@ -154,11 +154,11 @@ class RayClientPool:
         """清理过期的连接"""
         current_time = time.time()
         expired_clusters = []
-        
+
         for cluster_name, connection_info in self.connections.items():
             if current_time - connection_info['last_used'] > self.connection_timeout:
                 expired_clusters.append(cluster_name)
-                
+
         for cluster_name in expired_clusters:
             logger.info(f"Cleaning up expired connection for cluster {cluster_name}")
             self.mark_cluster_disconnected(cluster_name)

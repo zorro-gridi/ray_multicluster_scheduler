@@ -67,9 +67,9 @@ def submit_task(func: Callable, args: tuple = (), kwargs: dict = None,
     Returns:
         A tuple containing (task_id, result) where task_id is the unique identifier
         for the submitted task and result is the task result.
-        
+
     Note:
-        This function now supports concurrent task submissions. Multiple tasks can be 
+        This function now supports concurrent task submissions. Multiple tasks can be
         submitted simultaneously without interfering with each other.
 
     Raises:

@@ -13,7 +13,7 @@ from ray_multicluster_scheduler.app.client_api.unified_scheduler import (
 @ray.remote
 class Train:
     """Example training actor class."""
-
+    
     def __init__(self, model_name="default_model", learning_rate=0.01):
         """Initialize the training actor."""
         self.model_name = model_name
@@ -81,12 +81,12 @@ def demo_actor_method_parameters():
 
         # 3. 调用Actor方法并传递参数
         print("3. Calling actor methods with parameters...")
-
+        
         # 3.1 调用train方法并传递多个参数
         print("   a) Calling train() method with parameters:")
         train_result_ref = actor_instance.train.remote(
-            epochs=10,
-            batch_size=128,
+            epochs=10, 
+            batch_size=128, 
             optimizer="sgd"
         )
         train_result = ray.get(train_result_ref)
@@ -114,7 +114,7 @@ def demo_actor_method_parameters():
         for i in range(3):
             ref = actor_instance.train.remote(epochs=1, batch_size=64, optimizer=f"adam_{i}")
             train_refs.append(ref)
-
+        
         # 等待所有结果
         results = ray.get(train_refs)
         print(f"   Completed {len(results)} training sessions:")

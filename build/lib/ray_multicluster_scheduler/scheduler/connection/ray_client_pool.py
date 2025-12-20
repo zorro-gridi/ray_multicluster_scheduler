@@ -1,6 +1,6 @@
 import ray
 import time
-from typing import Dict, Optional
+from typing import Dict, Optional, Any
 from ray_multicluster_scheduler.common.model import ClusterMetadata
 from ray_multicluster_scheduler.common.logging import get_logger
 from ray_multicluster_scheduler.common.exception import ClusterConnectionError
@@ -12,10 +12,14 @@ class RayClientPool:
     """Manages a pool of Ray client connections to different clusters."""
 
     def __init__(self):
-        self.connections: Dict[str, any] = {}
+        self.connections: Dict[str, Any] = {}
         self.active_connections: Dict[str, bool] = {}
         # 存储连接时间戳，用于检测连接是否过期
         self.connection_timestamps: Dict[str, float] = {}
+        # 存储每个集群的连接状态
+        self.cluster_states: Dict[str, Dict] = {}
+        # 连接超时时间（秒）
+        self.connection_timeout = 300  # 5分钟
 
     def add_cluster(self, cluster_metadata: ClusterMetadata):
         """Add a cluster to the connection pool."""
@@ -26,50 +30,65 @@ class RayClientPool:
 
             # 检查是否已经存在连接
             if cluster_metadata.name in self.connections:
-                # 如果已有连接，先断开
-                try:
-                    ray.shutdown()
-                except:
-                    pass
+                logger.info(f"Cluster {cluster_metadata.name} already in pool, updating configuration")
 
-            # 建立新连接
-            # 注意：这里我们不直接调用ray.init()，而是存储连接信息
+            # 存储连接信息，但不立即建立连接
             # 实际的连接将在需要时建立
-            self.connections[cluster_metadata.name] = ray_client_address
+            self.connections[cluster_metadata.name] = {
+                'address': ray_client_address,
+                'metadata': cluster_metadata,
+                'connected': False,
+                'client': None,
+                'last_used': time.time()
+            }
             self.active_connections[cluster_metadata.name] = True
             self.connection_timestamps[cluster_metadata.name] = time.time()
+            self.cluster_states[cluster_metadata.name] = {
+                'last_used': time.time(),
+                'connection_count': 0,
+                'success_count': 0,
+                'failure_count': 0
+            }
             logger.info(f"Added cluster {cluster_metadata.name} to connection pool")
         except Exception as e:
             logger.error(f"Failed to add cluster {cluster_metadata.name} to connection pool: {e}")
             raise ClusterConnectionError(f"Could not connect to cluster {cluster_metadata.name}: {e}")
 
-    def get_connection(self, cluster_name: str) -> Optional[any]:
+    def get_connection(self, cluster_name: str) -> Optional[Any]:
         """Get a Ray client connection for a specific cluster."""
         if cluster_name in self.connections and self.active_connections.get(cluster_name, False):
-            return self.connections[cluster_name]
+            connection_info = self.connections[cluster_name]
+            # 检查连接是否有效
+            if self.is_connection_valid(cluster_name):
+                # 更新最后使用时间
+                connection_info['last_used'] = time.time()
+                if cluster_name in self.cluster_states:
+                    self.cluster_states[cluster_name]['last_used'] = time.time()
+                return connection_info
+            else:
+                # 连接无效，需要重新建立
+                logger.warning(f"Connection to cluster {cluster_name} is invalid, will reconnect on demand")
+                return None
         return None
 
     def release_connection(self, cluster_name: str):
         """Release a connection back to the pool."""
-        # In this simple implementation, we don't actually close connections
-        # but mark them as inactive if needed
-        if cluster_name in self.connections:
-            # Mark as inactive if needed
-            # In a more sophisticated implementation, we might actually close the connection
-            # or return it to a pool of available connections
-            pass
+        # 更新连接使用统计
+        if cluster_name in self.cluster_states:
+            self.cluster_states[cluster_name]['last_used'] = time.time()
 
     def remove_cluster(self, cluster_name: str):
         """Remove a cluster from the connection pool."""
         if cluster_name in self.connections:
             try:
-                # Disconnect from the cluster
-                ray.shutdown()
+                # 不要在这里断开连接，让系统自然管理
                 del self.connections[cluster_name]
                 if cluster_name in self.active_connections:
                     del self.active_connections[cluster_name]
                 if cluster_name in self.connection_timestamps:
                     del self.connection_timestamps[cluster_name]
+                if cluster_name in self.cluster_states:
+                    del self.cluster_states[cluster_name]
                 logger.info(f"Removed cluster {cluster_name} from connection pool")
             except Exception as e:
                 logger.error(f"Error removing cluster {cluster_name} from connection pool: {e}")
@@ -90,9 +109,15 @@ class RayClientPool:
             if cluster_name not in self.connections or not self.active_connections.get(cluster_name, False):
                 return False
 
-            # 对于每个集群，我们需要单独检查其连接状态
-            # 这里我们假设连接有效，实际验证将在任务提交时进行
-            return True
+            # 检查连接是否超时
+            connection_info = self.connections[cluster_name]
+            if time.time() - connection_info['last_used'] > self.connection_timeout:
+                logger.info(f"Connection to cluster {cluster_name} timed out, marking as invalid")
+                return False
+
+            # 对于连接池，我们假设连接是有效的，除非明确知道它已断开
+            # 实际验证将在任务提交时进行
+            return connection_info.get('connected', False)
         except Exception as e:
             logger.warning(f"Connection to cluster {cluster_name} is invalid: {e}")
             return False
@@ -102,3 +127,38 @@ class RayClientPool:
         if cluster_name in self.connection_timestamps:
             return time.time() - self.connection_timestamps[cluster_name]
         return float('inf')  # 表示连接不存在
+
+    def mark_cluster_connected(self, cluster_name: str):
+        """标记集群为已连接状态"""
+        if cluster_name in self.connections:
+            self.connections[cluster_name]['connected'] = True
+            self.connections[cluster_name]['last_used'] = time.time()
+            if cluster_name in self.cluster_states:
+                self.cluster_states[cluster_name]['connection_count'] += 1
+                self.cluster_states[cluster_name]['success_count'] += 1
+
+    def mark_cluster_disconnected(self, cluster_name: str):
+        """标记集群为已断开连接状态"""
+        if cluster_name in self.connections:
+            self.connections[cluster_name]['connected'] = False
+            if cluster_name in self.cluster_states:
+                self.cluster_states[cluster_name]['failure_count'] += 1
+
+    def get_cluster_stats(self, cluster_name: str) -> Dict:
+        """获取集群连接统计信息"""
+        if cluster_name in self.cluster_states:
+            return self.cluster_states[cluster_name].copy()
+        return {}
+
+    def cleanup_expired_connections(self):
+        """清理过期的连接"""
+        current_time = time.time()
+        expired_clusters = []
+        
+        for cluster_name, connection_info in self.connections.items():
+            if current_time - connection_info['last_used'] > self.connection_timeout:
+                expired_clusters.append(cluster_name)
+                
+        for cluster_name in expired_clusters:
+            logger.info(f"Cleaning up expired connection for cluster {cluster_name}")
+            self.mark_cluster_disconnected(cluster_name)

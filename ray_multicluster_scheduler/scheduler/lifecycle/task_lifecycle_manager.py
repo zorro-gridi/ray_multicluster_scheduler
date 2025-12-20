@@ -62,10 +62,10 @@ class TaskLifecycleManager:
 
         try:
             logger.info("Initializing cluster connections...")
-            
+
             # 获取集群配置
             cluster_configs = getattr(self.cluster_monitor.cluster_manager, 'clusters', {})
-            
+
             # 注册集群到连接管理器（只在第一次初始化时进行）
             successful_registrations = 0
             for cluster_name, cluster_config in cluster_configs.items():
@@ -123,7 +123,7 @@ class TaskLifecycleManager:
             logger.info(f"任务 {task_desc.task_id} 调度到集群 {decision.cluster_name}")
             # 实际调度任务到选定的集群
             future = self.dispatcher.dispatch_task(task_desc, cluster_snapshots)
-            
+
             # 等待任务执行完成并获取结果
             result = ray.get(future)
             logger.info(f"任务 {task_desc.task_id} 执行完成，结果: {result}")
