@@ -4,8 +4,9 @@
 # prefer: 是否优先使用此集群（布尔值）
 # weight: 集群权重（数值）
 # tags: 集群标签
-# home_dir: 集群的home目录路径
-# conda: 集群默认使用的conda虚拟环境名
+# runtime_env: ray job 运行时环境
+# home_dir: 集群的home目录路径（已移至runtime_env.env_vars）
+# conda: 集群默认使用的conda虚拟环境名（已移至runtime_env）
 
 clusters:
   # CentOS cluster
@@ -14,8 +15,11 @@ clusters:
     dashboard: http://192.168.5.7:31591
     prefer: false
     weight: 1.0
-    home_dir: /home/zorro
-    conda: ts
+    runtime_env:
+      conda: ts
+      env_vars:
+        home_dir: /home/zorro
+      working_dir: .
     tags:
       - linux
       - x86_64
@@ -26,8 +30,11 @@ clusters:
     dashboard: http://192.168.5.2:8265
     prefer: true
     weight: 1.2
-    home_dir: /Users/zorro
-    conda: k8s
+    runtime_env:
+      conda: k8s
+      env_vars:
+        home_dir: /Users/zorro
+      working_dir: .
     tags:
       - macos
       - arm64

@@ -30,8 +30,7 @@ class ClusterMetadata:
     dashboard: str
     prefer: bool = False
     weight: float = 1.0
-    home_dir: Optional[str] = None
-    conda: Optional[str] = None  # 新增：集群默认使用的conda虚拟环境名
+    runtime_env: Optional[Dict[str, Any]] = None  # 新增：运行时环境配置，包含conda和home_dir等信息
     tags: List[str] = field(default_factory=list)
 
 

@@ -51,8 +51,7 @@ def _ensure_scheduler_initialized():
 def submit_task(func: Callable, args: tuple = (), kwargs: dict = None,
                 resource_requirements: Dict[str, float] = None,
                 tags: List[str] = None, name: str = "",
-                preferred_cluster: Optional[str] = None,
-                runtime_env: Optional[Dict[str, Any]] = None) -> Tuple[str, Any]:
+                preferred_cluster: Optional[str] = None) -> Tuple[str, Any]:
     """
     Submit a task to the scheduler.
 
@@ -64,7 +63,6 @@ def submit_task(func: Callable, args: tuple = (), kwargs: dict = None,
         tags: List of tags to associate with the task
         name: Optional name for the task
         preferred_cluster: Optional preferred cluster name for task execution
-        runtime_env: Optional runtime environment configuration (e.g., {"conda": "k8s", "work_dir": "/path/to/work"})
 
     Returns:
         A tuple containing (task_id, result) where task_id is the unique identifier
@@ -101,8 +99,8 @@ def submit_task(func: Callable, args: tuple = (), kwargs: dict = None,
         resource_requirements=resource_requirements,
         tags=tags,
         is_actor=False,
-        preferred_cluster=preferred_cluster,  # 新增：传递首选集群名称
-        runtime_env=runtime_env  # 新增：传递运行时环境配置
+        preferred_cluster=preferred_cluster  # 新增：传递首选集群名称
+        # 注意：已移除runtime_env参数
     )
 
     # Submit task to the lifecycle manager and get the future

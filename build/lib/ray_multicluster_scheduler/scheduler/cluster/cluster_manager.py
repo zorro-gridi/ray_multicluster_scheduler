@@ -23,8 +23,7 @@ class ClusterConfig:
     dashboard: str
     prefer: bool = False
     weight: float = 1.0
-    home_dir: Optional[str] = None
-    conda: Optional[str] = None  # 新增：集群默认使用的conda虚拟环境名
+    runtime_env: Optional[Dict[str, Any]] = None  # 新增：运行时环境配置，包含conda和home_dir等信息
     tags: List[str] = field(default_factory=list)
 
 
@@ -86,7 +85,10 @@ class ClusterManager:
     def get_cluster_home_dir(self, cluster_name: str) -> Optional[str]:
         """Get the home directory for a specific cluster."""
         config = self.get_cluster_config(cluster_name)
-        return config.home_dir if config else None
+        if config and config.runtime_env:
+            env_vars = config.runtime_env.get('env_vars', {})
+            return env_vars.get('home_dir')
+        return None
 
     def _log_cluster_configurations(self):
         """Log cluster configurations for debugging."""
@@ -106,7 +108,14 @@ class ClusterManager:
             logger.info(f"  地址: {config.head_address}")
             logger.info(f"  首选项: {'是' if config.prefer else '否'}")
             logger.info(f"  权重: {config.weight}")
-            logger.info(f"  Home目录: {config.home_dir or '未设置'}")  # 更新：处理None值
+
+            # 从runtime_env中提取home_dir信息
+            home_dir = "未设置"
+            if config.runtime_env:
+                env_vars = config.runtime_env.get('env_vars', {})
+                home_dir = env_vars.get('home_dir', '未设置')
+            logger.info(f"  Home目录: {home_dir}")
+
             logger.info(f"  评分: {score}")
             logger.info(f"  标签: {', '.join(config.tags)}")
 

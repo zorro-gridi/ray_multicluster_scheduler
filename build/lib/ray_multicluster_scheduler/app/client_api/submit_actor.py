@@ -50,8 +50,7 @@ def _ensure_scheduler_initialized():
 def submit_actor(actor_class: Type, args: tuple = (), kwargs: dict = None,
                  resource_requirements: Dict[str, float] = None,
                  tags: List[str] = None, name: str = "",
-                 preferred_cluster: Optional[str] = None,
-                 runtime_env: Optional[Dict[str, Any]] = None) -> Tuple[str, Any]:
+                 preferred_cluster: Optional[str] = None) -> Tuple[str, Any]:
     """
     Submit an actor to the scheduler.
 
@@ -63,7 +62,6 @@ def submit_actor(actor_class: Type, args: tuple = (), kwargs: dict = None,
         tags: List of tags to associate with the actor
         name: Optional name for the actor
         preferred_cluster: Optional preferred cluster name for actor execution
-        runtime_env: Optional runtime environment configuration
 
     Returns:
         A tuple containing (task_id, result) where task_id is the unique identifier
@@ -100,8 +98,8 @@ def submit_actor(actor_class: Type, args: tuple = (), kwargs: dict = None,
         resource_requirements=resource_requirements,
         tags=tags,
         is_actor=True,
-        preferred_cluster=preferred_cluster,
-        runtime_env=runtime_env
+        preferred_cluster=preferred_cluster
+        # 注意：已移除runtime_env参数
     )
 
     # Submit actor to the lifecycle manager and get the future

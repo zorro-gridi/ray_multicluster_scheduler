@@ -60,27 +60,52 @@ class ClusterMonitor:
         self._clusters_refreshed = True
 
     def _add_default_clusters(self):
-        """Add default test cluster configurations."""
-        # 使用ConfigManager来加载默认集群配置
-        from ray_multicluster_scheduler.control_plane.config import ConfigManager
+        """Add default cluster configurations if no custom configuration is provided."""
+        logger.info("📁 使用默认集群配置")
 
-        # 创建ConfigManager实例，不指定配置文件路径以使用默认配置
-        config_manager = ConfigManager()
+        # Create default cluster configurations using ClusterMetadata
+        from ray_multicluster_scheduler.common.model import ClusterMetadata
 
-        # 获取默认集群配置
-        default_clusters = config_manager.get_cluster_configs()
+        default_clusters = [
+            ClusterMetadata(
+                name="centos",
+                head_address="192.168.5.7:32546",
+                dashboard="http://192.168.5.7:31591",
+                prefer=False,
+                weight=1.0,
+                runtime_env={
+                    "conda": "ts",
+                    "env_vars": {
+                        "home_dir": "/home/zorro"
+                    }
+                },
+                tags=["linux", "x86_64"]
+            ),
+            ClusterMetadata(
+                name="mac",
+                head_address="192.168.5.2:32546",
+                dashboard="http://192.168.5.2:8265",
+                prefer=True,
+                weight=1.2,
+                runtime_env={
+                    "conda": "k8s",
+                    "env_vars": {
+                        "home_dir": "/Users/zorro"
+                    }
+                },
+                tags=["macos", "arm64"]
+            )
+        ]
 
-        # 将默认集群配置添加到集群管理器中
+        # Register default clusters with the cluster manager
         for cluster_meta in default_clusters:
-            # 注意：需要将ClusterMetadata转换为ClusterConfig
             self.cluster_manager.clusters[cluster_meta.name] = ClusterConfig(
                 name=cluster_meta.name,
                 head_address=cluster_meta.head_address,
                 dashboard=cluster_meta.dashboard,
                 prefer=cluster_meta.prefer,
                 weight=cluster_meta.weight,
-                home_dir=cluster_meta.home_dir,
-                conda=getattr(cluster_meta, 'conda', None),  # 如果ClusterMetadata有conda属性则使用，否则为None
+                runtime_env=cluster_meta.runtime_env,
                 tags=cluster_meta.tags
             )
 
@@ -93,14 +118,16 @@ class ClusterMonitor:
 
             # Update cluster configurations in the manager
             for cluster_config in config_data.get('clusters', []):
+                # 直接使用runtime_env属性
+                runtime_env = cluster_config.get('runtime_env', {})
+
                 self.cluster_manager.clusters[cluster_config['name']] = ClusterConfig(
                     name=cluster_config['name'],
                     head_address=cluster_config['head_address'],
                     dashboard=cluster_config['dashboard'],
                     prefer=cluster_config.get('prefer', False),
                     weight=cluster_config.get('weight', 1.0),
-                    home_dir=cluster_config.get('home_dir'),
-                    conda=cluster_config.get('conda'),  # 新增：加载conda属性
+                    runtime_env=runtime_env,
                     tags=cluster_config.get('tags', [])
                 )
 

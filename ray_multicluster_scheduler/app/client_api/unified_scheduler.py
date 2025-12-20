@@ -195,8 +195,7 @@ class UnifiedScheduler:
         resource_requirements: Dict[str, float] = None,
         tags: List[str] = None,
         name: str = "",
-        preferred_cluster: Optional[str] = None,
-        runtime_env: Optional[Dict[str, Any]] = None
+        preferred_cluster: Optional[str] = None
     ) -> Any:
         """
         Submit a task to the multicluster scheduler.
@@ -216,8 +215,6 @@ class UnifiedScheduler:
             name (str, optional): Optional name for the task. Defaults to "".
             preferred_cluster (str, optional): Preferred cluster name for task execution.
                 If specified cluster is unavailable, scheduler will fallback to other clusters.
-            runtime_env (Dict[str, Any], optional): Runtime environment configuration.
-                Defaults to None.
 
         Returns:
             Any: Task submission result - a tuple containing (task_id, result)
@@ -253,8 +250,7 @@ class UnifiedScheduler:
                 resource_requirements=resource_requirements,
                 tags=tags,
                 name=name,
-                preferred_cluster=preferred_cluster,
-                runtime_env=runtime_env
+                preferred_cluster=preferred_cluster
             )
             logger.info(f"Task {name} submitted successfully with task_id: {task_id}")
             return task_id, result
@@ -272,8 +268,7 @@ class UnifiedScheduler:
         resource_requirements: Dict[str, float] = None,
         tags: List[str] = None,
         name: str = "",
-        preferred_cluster: Optional[str] = None,
-        runtime_env: Optional[Dict[str, Any]] = None
+        preferred_cluster: Optional[str] = None
     ) -> Any:
         """
         Submit an actor to the multicluster scheduler.
@@ -293,8 +288,6 @@ class UnifiedScheduler:
             name (str, optional): Optional name for the actor. Defaults to "".
             preferred_cluster (str, optional): Preferred cluster name for actor execution.
                 If specified cluster is unavailable, scheduler will fallback to other clusters.
-            runtime_env (Dict[str, Any], optional): Runtime environment configuration.
-                Defaults to None.
 
         Returns:
             Any: Actor submission result - a tuple containing (actor_id, actor_instance)
@@ -330,8 +323,7 @@ class UnifiedScheduler:
                 resource_requirements=resource_requirements,
                 tags=tags,
                 name=name,
-                preferred_cluster=preferred_cluster,
-                runtime_env=runtime_env
+                preferred_cluster=preferred_cluster
             )
             logger.info(f"Actor {name} submitted successfully with actor_id: {actor_id}")
             return actor_id, actor_instance
@@ -415,8 +407,7 @@ def submit_task(
     resource_requirements: Dict[str, float] = None,
     tags: List[str] = None,
     name: str = "",
-    preferred_cluster: Optional[str] = None,
-    runtime_env: Optional[Dict[str, Any]] = None
+    preferred_cluster: Optional[str] = None
 ) -> Any:
     """
     Submit a task to the multicluster scheduler.
@@ -435,8 +426,6 @@ def submit_task(
         name (str, optional): Optional name for the task. Defaults to "".
         preferred_cluster (str, optional): Preferred cluster name for task execution.
             If specified cluster is unavailable, scheduler will fallback to other clusters.
-        runtime_env (Dict[str, Any], optional): Runtime environment configuration.
-            Defaults to None.
 
     Returns:
         Any: Task submission result - a tuple containing (task_id, result)
@@ -453,8 +442,7 @@ def submit_task(
             resource_requirements=resource_requirements,
             tags=tags,
             name=name,
-            preferred_cluster=preferred_cluster,
-            runtime_env=runtime_env
+            preferred_cluster=preferred_cluster
         )
     except Exception as e:
         logger.error(f"Failed to submit task {name}: {e}")
@@ -471,8 +459,7 @@ def submit_actor(
     resource_requirements: Dict[str, float] = None,
     tags: List[str] = None,
     name: str = "",
-    preferred_cluster: Optional[str] = None,
-    runtime_env: Optional[Dict[str, Any]] = None
+    preferred_cluster: Optional[str] = None
 ) -> Any:
     """
     Submit an actor to the multicluster scheduler.
@@ -491,8 +478,6 @@ def submit_actor(
         name (str, optional): Optional name for the actor. Defaults to "".
         preferred_cluster (str, optional): Preferred cluster name for actor execution.
             If specified cluster is unavailable, scheduler will fallback to other clusters.
-        runtime_env (Dict[str, Any], optional): Runtime environment configuration.
-            Defaults to None.
 
     Returns:
         Any: Actor submission result - a tuple containing (actor_id, actor_instance)
@@ -509,8 +494,7 @@ def submit_actor(
             resource_requirements=resource_requirements,
             tags=tags,
             name=name,
-            preferred_cluster=preferred_cluster,
-            runtime_env=runtime_env
+            preferred_cluster=preferred_cluster
         )
     except Exception as e:
         logger.error(f"Failed to submit actor {name}: {e}")

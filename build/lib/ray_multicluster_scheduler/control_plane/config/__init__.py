@@ -96,8 +96,12 @@ class ConfigManager:
                     dashboard="http://192.168.5.7:31591",
                     prefer=False,
                     weight=1.0,
-                    home_dir="/home/zorro",  # 从配置文件读取的默认值
-                    conda="ts",  # 添加conda属性
+                    runtime_env={
+                        "conda": "ts",
+                        "env_vars": {
+                            "home_dir": "/home/zorro"
+                        }
+                    },
                     tags=["linux", "x86_64"]
                 ),
                 ClusterMetadata(
@@ -106,8 +110,12 @@ class ConfigManager:
                     dashboard="http://192.168.5.2:8265",
                     prefer=True,
                     weight=1.2,
-                    home_dir="/Users/zorro",  # 从配置文件读取的默认值
-                    conda="k8s",  # 添加conda属性
+                    runtime_env={
+                        "conda": "k8s",
+                        "env_vars": {
+                            "home_dir": "/Users/zorro"
+                        }
+                    },
                     tags=["macos", "arm64"]
                 )
             ]
@@ -119,41 +127,23 @@ class ConfigManager:
 
             clusters = []
             for cluster_data in config.get('clusters', []):
+                # 从runtime_env中提取配置信息
+                runtime_env = cluster_data.get('runtime_env', {})
+
                 clusters.append(ClusterMetadata(
                     name=cluster_data['name'],
                     head_address=cluster_data['head_address'],
                     dashboard=cluster_data['dashboard'],
                     prefer=cluster_data.get('prefer', False),
                     weight=cluster_data.get('weight', 1.0),
-                    home_dir=cluster_data.get('home_dir'),  # 从配置文件读取，没有默认值
-                    conda=cluster_data.get('conda'),  # 从配置文件读取conda属性
+                    runtime_env=runtime_env,
                     tags=cluster_data.get('tags', [])
                 ))
 
             return clusters
 
         except Exception as e:
-            print(f"Error loading cluster configurations from {config_file}: {e}")
-            # Return default configuration if loading fails
-            return [
-                ClusterMetadata(
-                    name="centos",
-                    head_address="192.168.5.7:32546",
-                    dashboard="http://192.168.5.7:31591",
-                    prefer=False,
-                    weight=1.0,
-                    home_dir="/home/zorro",  # 从配置文件读取的默认值
-                    conda="ts",  # 添加conda属性
-                    tags=["linux", "x86_64"]
-                ),
-                ClusterMetadata(
-                    name="mac",
-                    head_address="192.168.5.2:32546",
-                    dashboard="http://192.168.5.2:8265",
-                    prefer=True,
-                    weight=1.2,
-                    home_dir="/Users/zorro",  # 从配置文件读取的默认值
-                    conda="k8s",  # 添加conda属性
-                    tags=["macos", "arm64"]
-                )
-            ]
+            print(f"❌ Error loading cluster configurations from {config_file}: {e}")
+            import traceback
+            traceback.print_exc()
+            raise e

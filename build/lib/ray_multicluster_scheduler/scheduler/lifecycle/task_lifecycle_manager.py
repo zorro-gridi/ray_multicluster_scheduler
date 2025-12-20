@@ -82,8 +82,7 @@ class TaskLifecycleManager:
                             dashboard=cluster_config.dashboard,
                             prefer=cluster_config.prefer,
                             weight=cluster_config.weight,
-                            home_dir=cluster_config.home_dir,
-                            conda=cluster_config.conda,  # 新增：传递conda属性
+                            runtime_env=cluster_config.runtime_env,  # 使用runtime_env属性
                             tags=cluster_config.tags
                         )
                         self.connection_manager.register_cluster(cluster_metadata)

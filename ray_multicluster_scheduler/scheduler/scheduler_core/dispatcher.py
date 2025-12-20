@@ -1,7 +1,7 @@
 import ray
 import logging
 from typing import Dict, Optional, Callable
-from ray_multicluster_scheduler.common.model import TaskDescription, ResourceSnapshot
+from ray_multicluster_scheduler.common.model import TaskDescription, ResourceSnapshot, ClusterMetadata
 from ray_multicluster_scheduler.scheduler.policy.policy_engine import PolicyEngine
 from ray_multicluster_scheduler.scheduler.connection.connection_lifecycle import ConnectionLifecycleManager
 from ray_multicluster_scheduler.common.circuit_breaker import ClusterCircuitBreakerManager
@@ -84,7 +84,7 @@ class Dispatcher:
             raise TaskSubmissionError(f"Failed to submit task {task_desc.task_id} to cluster {decision.cluster_name}: {e}")
 
     def _connect_to_cluster(self, cluster_name: str):
-        """Connect to the specified cluster."""
+        """Connect to the specified cluster with runtime environment configuration."""
         try:
             # 获取集群元数据
             cluster_metadata = self.connection_manager.cluster_metadata.get(cluster_name)
@@ -101,55 +101,41 @@ class Dispatcher:
             except:
                 pass
 
-            # 连接到目标集群
+            # 构建集群特定的runtime_env配置
+            runtime_env = self._build_runtime_env_for_cluster(cluster_metadata)
+
+            # 连接到目标集群，使用集群特定的runtime_env配置
             ray.init(
                 address=ray_client_address,
+                runtime_env=runtime_env,
                 ignore_reinit_error=True
             )
 
-            logger.info(f"Successfully connected to cluster {cluster_name}")
+            logger.info(f"Successfully connected to cluster {cluster_name} with runtime_env: {runtime_env}")
         except Exception as e:
             logger.error(f"Failed to connect to cluster {cluster_name}: {e}")
             raise TaskSubmissionError(f"Could not connect to cluster {cluster_name}: {e}")
 
+    def _build_runtime_env_for_cluster(self, cluster_metadata: ClusterMetadata) -> Optional[Dict]:
+        """Build runtime environment configuration for a specific cluster."""
+        # 从集群配置文件中获取runtime_env配置
+        # 注意：这里我们假设ConfigManager已经正确解析了配置文件中的runtime_env部分
+        # 并将相关信息存储在ClusterMetadata对象中
+
+        if not cluster_metadata.runtime_env:
+            logger.info(f"No runtime_env configuration found for cluster {cluster_metadata.name}")
+            return None
+
+        # 直接使用集群配置中的runtime_env
+        runtime_env = cluster_metadata.runtime_env.copy()
+        logger.info(f"Configured runtime_env for cluster {cluster_metadata.name}: {runtime_env}")
+
+        return runtime_env
+
     def _prepare_runtime_env_for_cluster(self, task_desc: TaskDescription, cluster_name: str) -> Optional[Dict]:
-        """Prepare runtime environment with cluster-specific home_dir and conda settings."""
-        # 获取集群的home_dir和conda环境
-        cluster_metadata = self.connection_manager.cluster_metadata.get(cluster_name)
-        cluster_home_dir = cluster_metadata.home_dir if cluster_metadata else None
-        cluster_conda_env = cluster_metadata.conda if cluster_metadata else None
-
-        # 如果集群没有配置home_dir，则不设置该环境变量
-        if not cluster_home_dir:
-            logger.warning(f"Cluster {cluster_name} does not have home_dir configured")
-
-        # 如果集群没有配置conda环境，则不设置该环境变量
-        if not cluster_conda_env:
-            logger.warning(f"Cluster {cluster_name} does not have conda environment configured")
-
-        # 如果任务没有提供runtime_env，则创建一个新的
-        if task_desc.runtime_env is None:
-            runtime_env = {}
-        else:
-            # 复制现有的runtime_env配置
-            runtime_env = task_desc.runtime_env.copy()
-
-        # 当发生集群迁移时，使用目标集群的配置覆盖原有的配置
-        # 设置集群特定的home_dir环境变量
-        if cluster_home_dir:
-            # 确保env_vars存在
-            if "env_vars" not in runtime_env:
-                runtime_env["env_vars"] = {}
-
-            # 设置集群特定的home_dir环境变量（覆盖原有值）
-            runtime_env["env_vars"]["home_dir"] = cluster_home_dir
-            logger.info(f"Prepared runtime_env for cluster {cluster_name}: home_dir={cluster_home_dir}")
-
-        # 设置集群特定的conda环境（覆盖原有值）
-        # 只有当集群配置了conda环境时才进行覆盖
-        if cluster_conda_env:
-            # 不管用户是否指定了conda环境，都使用目标集群的conda环境配置
-            runtime_env["conda"] = cluster_conda_env
-            logger.info(f"Prepared runtime_env for cluster {cluster_name}: conda={cluster_conda_env}")
-
-        return runtime_env if runtime_env else None
+        """Prepare runtime environment - now simply returns None as runtime_env is configured at connection time."""
+        # Since runtime_env is now configured at the cluster connection level,
+        # we don't need to prepare it per task submission.
+        # The cluster's default runtime_env will be used.
+        logger.debug(f"Using cluster default runtime_env for task {task_desc.task_id} on cluster {cluster_name}")
+        return None
