@@ -16,7 +16,7 @@ def simulate_cross_cluster_scheduling():
     print("=" * 80)
     print("📊 跨集群调度统计模拟")
     print("=" * 80)
-    
+
     # 模拟集群配置
     clusters = {
         "centos": {
@@ -34,7 +34,7 @@ def simulate_cross_cluster_scheduling():
             "tags": ["macos", "arm64"]
         }
     }
-    
+
     # 显示集群信息
     print("\n📋 集群配置信息:")
     total_system_capacity = 0
@@ -47,35 +47,35 @@ def simulate_cross_cluster_scheduling():
         print(f"    是否偏好集群: {'是' if config['prefer'] else '否'}")
         print(f"    权重: {config['weight']}")
         print(f"    标签: {', '.join(config['tags'])}")
-    
+
     print(f"\n  系统总CPU容量: {total_system_capacity}")
-    
+
     # 模拟任务提交和调度过程
     print(f"\n🚀 模拟提交 {total_system_capacity + 10} 个并发任务:")
-    
+
     # 任务分配统计
     task_allocation = {
         "centos": 0,
         "mac": 0,
         "queued": 0
     }
-    
+
     # 模拟任务调度逻辑
     tasks_to_schedule = total_system_capacity + 10
     resource_threshold = 0.8  # 80%资源阈值
-    
+
     # 模拟资源使用情况
     cluster_resources = {
         "centos": {"used_cpu": 0, "total_cpu": 16},
         "mac": {"used_cpu": 0, "total_cpu": 8}
     }
-    
+
     # 模拟任务调度过程
     scheduled_tasks = 0
     queued_tasks = 0
-    
+
     print(f"\n🔄 任务调度过程:")
-    
+
     # 第一轮：调度任务到各个集群直到达到阈值
     for i in range(tasks_to_schedule):
         # 确定首选集群
@@ -85,11 +85,11 @@ def simulate_cross_cluster_scheduling():
             preferred_cluster = "mac"
         else:  # 1/3任务使用负载均衡
             preferred_cluster = None
-        
+
         # 计算各集群当前使用率
         centos_utilization = cluster_resources["centos"]["used_cpu"] / cluster_resources["centos"]["total_cpu"]
         mac_utilization = cluster_resources["mac"]["used_cpu"] / cluster_resources["mac"]["total_cpu"]
-        
+
         # 决定调度到哪个集群
         target_cluster = None
         if preferred_cluster:
@@ -129,7 +129,7 @@ def simulate_cross_cluster_scheduling():
             else:
                 # 所有集群都过载，任务排队
                 target_cluster = "queue"
-        
+
         # 更新统计和资源使用情况
         if target_cluster == "queue":
             task_allocation["queued"] += 1
@@ -140,19 +140,19 @@ def simulate_cross_cluster_scheduling():
             scheduled_tasks += 1
             cluster_resources[target_cluster]["used_cpu"] += 1
             print(f"  任务 {i+1}: 调度到 {target_cluster} 集群")
-    
+
     # 生成最终统计数据
     print("\n" + "=" * 80)
     print("📈 最终统计数据报告")
     print("=" * 80)
-    
+
     # 任务分配统计
     print(f"\n📊 任务分配统计:")
     print(f"  调度到centos集群: {task_allocation['centos']} 个任务")
     print(f"  调度到mac集群: {task_allocation['mac']} 个任务")
     print(f"  队列等待: {task_allocation['queued']} 个任务")
     print(f"  总计: {sum(task_allocation.values())} 个任务")
-    
+
     # 集群资源使用情况
     print(f"\n🖥️  集群资源使用情况:")
     for cluster_name, resources in cluster_resources.items():
@@ -161,7 +161,7 @@ def simulate_cross_cluster_scheduling():
         utilization = used_cpu / total_cpu if total_cpu > 0 else 0
         print(f"  {cluster_name}集群:")
         print(f"    CPU使用: {used_cpu}/{total_cpu} ({utilization:.1%})")
-    
+
     # 负载分布分析
     print(f"\n⚖️  负载分布分析:")
     total_scheduled = task_allocation['centos'] + task_allocation['mac']
@@ -170,7 +170,7 @@ def simulate_cross_cluster_scheduling():
         mac_percentage = (task_allocation['mac'] / total_scheduled) * 100
         print(f"  centos集群负载: {centos_percentage:.1f}%")
         print(f"  mac集群负载: {mac_percentage:.1f}%")
-    
+
     # 调度效率分析
     print(f"\n⚡ 调度效率分析:")
     print(f"  即时调度任务数: {scheduled_tasks}")
@@ -179,7 +179,7 @@ def simulate_cross_cluster_scheduling():
     if total_tasks > 0:
         immediate_scheduling_rate = (scheduled_tasks / total_tasks) * 100
         print(f"  即时调度成功率: {immediate_scheduling_rate:.1f}%")
-    
+
     # 系统容量分析
     print(f"\n📏 系统容量分析:")
     print(f"  系统总CPU容量: {total_system_capacity}")
@@ -187,7 +187,7 @@ def simulate_cross_cluster_scheduling():
     if total_system_capacity > 0:
         capacity_utilization = (total_scheduled / total_system_capacity) * 100
         print(f"  系统容量利用率: {capacity_utilization:.1f}%")
-    
+
     return task_allocation, cluster_resources
 
 
@@ -196,28 +196,28 @@ def explain_scheduling_mechanism():
     print("\n" + "=" * 80)
     print("🧠 跨集群调度机制详解")
     print("=" * 80)
-    
+
     print("\n🔧 调度策略:")
     print("  1. 首选集群优先策略:")
     print("     • 用户可通过preferred_cluster参数指定首选集群")
     print("     • 系统优先尝试将任务调度到指定集群")
     print("     • 若指定集群资源不足，则尝试其他集群")
-    
+
     print("\n  2. 资源阈值控制:")
     print("     • 系统设定80%资源使用率阈值")
     print("     • 当集群资源使用率超过阈值时，新任务进入队列等待")
     print("     • 防止集群过载，确保系统稳定性")
-    
+
     print("\n  3. 负载均衡策略:")
     print("     • 未指定首选集群的任务采用负载均衡调度")
     print("     • 系统选择资源最充足的集群执行任务")
     print("     • 考虑集群权重和资源使用率进行智能调度")
-    
+
     print("\n  4. 动态重调度:")
     print("     • 系统每30秒重新评估队列中的任务")
     print("     • 资源释放后自动调度等待中的任务")
     print("     • 确保资源充分利用")
-    
+
     print("\n🔄 调度流程:")
     print("  1. 任务提交 → 检查是否指定首选集群")
     print("  2. 指定集群 → 检查该集群资源使用率")
@@ -234,22 +234,22 @@ def show_real_world_implications():
     print("\n" + "=" * 80)
     print("🌐 实际应用场景")
     print("=" * 80)
-    
+
     print("\n🏭 企业级应用:")
     print("  • 混合云环境下的任务调度")
     print("  • 异构计算资源的统一管理")
     print("  • 跨地域数据中心的任务分发")
-    
+
     print("\n🔬 科学计算:")
     print("  • 不同架构CPU的任务适配")
     print("  • GPU资源的智能分配")
     print("  • 大规模并行计算任务调度")
-    
+
     print("\n🎮 游戏开发:")
     print("  • 多平台构建任务分发")
     print("  • 不同硬件环境的测试任务")
     print("  • 实时渲染任务的负载均衡")
-    
+
     print("\n🛍️ 电商平台:")
     print("  • 高峰期流量的弹性调度")
     print("  • 不同业务模块的资源隔离")
@@ -259,13 +259,13 @@ def show_real_world_implications():
 if __name__ == "__main__":
     # 运行模拟统计
     task_allocation, cluster_resources = simulate_cross_cluster_scheduling()
-    
+
     # 解释调度机制
     explain_scheduling_mechanism()
-    
+
     # 展示实际应用场景
     show_real_world_implications()
-    
+
     print("\n" + "=" * 80)
     print("✅ 跨集群调度统计分析完成!")
     print("=" * 80)

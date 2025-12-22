@@ -30,27 +30,27 @@ def diagnose_cluster_connections():
     print("=" * 60)
     print("诊断集群连接")
     print("=" * 60)
-    
+
     try:
         # 加载集群配置
         config_manager = ConfigManager()
         clusters = config_manager.load_clusters()
-        
+
         print(f"加载到 {len(clusters)} 个集群配置:")
-        
+
         for i, cluster in enumerate(clusters):
             print(f"\n集群 {i+1}: {cluster.name}")
             print(f"  地址: {cluster.head_address}")
             print(f"  仪表板: {cluster.dashboard}")
             print(f"  偏好: {cluster.prefer}")
-            
+
             # 解析地址
             if ':' in cluster.head_address:
                 host, port = cluster.head_address.split(':')
                 port = int(port)
                 print(f"  主机: {host}")
                 print(f"  端口: {port}")
-                
+
                 # 测试网络连通性
                 print(f"  网络连通性测试: ", end="")
                 if test_network_connectivity(host, port):
@@ -59,7 +59,7 @@ def diagnose_cluster_connections():
                     print("❌ 不可达")
             else:
                 print(f"  ❌ 地址格式不正确: {cluster.head_address}")
-        
+
         return clusters
     except Exception as e:
         print(f"❌ 集群配置加载失败: {e}")
@@ -73,20 +73,20 @@ def check_cluster_status():
     print("\n" + "=" * 60)
     print("检查集群状态")
     print("=" * 60)
-    
+
     try:
         # 导入必要的模块
         from ray_multicluster_scheduler.scheduler.cluster.cluster_manager import ClusterManager
-        
+
         # 创建集群管理器
         cluster_manager = ClusterManager()
         print("✅ 集群管理器创建成功")
-        
+
         # 刷新集群状态
         print("刷新集群状态...")
         cluster_manager.refresh_all_clusters()
         print("✅ 集群状态刷新完成")
-        
+
         # 显示集群信息
         print(f"\n发现 {len(cluster_manager.clusters)} 个集群:")
         for name, config in cluster_manager.clusters.items():
@@ -102,7 +102,7 @@ def check_cluster_status():
                     print(f"    CPU: {cpu_free}/{cpu_total}")
             else:
                 print("    ❌ 无法获取健康状态")
-        
+
         return cluster_manager
     except Exception as e:
         print(f"❌ 集群状态检查失败: {e}")
@@ -114,10 +114,10 @@ def check_cluster_status():
 if __name__ == "__main__":
     # 诊断集群连接
     clusters = diagnose_cluster_connections()
-    
+
     # 检查集群状态
     cluster_manager = check_cluster_status()
-    
+
     print("\n" + "=" * 60)
     print("诊断完成!")
     print("=" * 60)
