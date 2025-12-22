@@ -312,14 +312,6 @@ Application
 
 > **这是一个“Ray Cluster 之上的 Kubernetes 风格调度控制平面”，Ray 只负责单集群执行，而你这个系统负责“选哪个 Ray 集群”。**
 
-如果你愿意，下一步我可以帮你进一步：
-
-* 把该架构**映射到 KubeRay + RayJob**
-* 或设计 **Scheduler 与 Ray Serve / Actor Pool 的结合方案**
-* 或给出 **生产级失败重试 / 熔断设计**
-
-你可以直接指定下一步方向。
-
 
 # 【项目完整实施计划】
 # 项目总体目标

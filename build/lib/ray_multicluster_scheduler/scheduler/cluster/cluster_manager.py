@@ -201,9 +201,10 @@ class ClusterManager:
             avail_resources = ray.available_resources()
             total_resources = ray.cluster_resources()
 
-            # 计算评分
-            cpu_free = avail_resources.get("CPU", 0)
-            cpu_total = total_resources.get("CPU", 0)
+            # 处理MAC集群的特殊CPU资源
+            # 对于MAC集群，我们需要同时考虑CPU和MacCPU资源
+            cpu_free, cpu_total = self._calculate_cpu_resources(avail_resources, total_resources, config)
+
             gpu_free = avail_resources.get("GPU", 0)
             gpu_total = total_resources.get("GPU", 0)
 
@@ -257,6 +258,37 @@ class ClusterManager:
             health.update(-1, {}, False, str(e))
 
         return health
+
+    def _calculate_cpu_resources(self, avail_resources: Dict[str, Any],
+                                total_resources: Dict[str, Any],
+                                config: ClusterConfig) -> tuple:
+        """
+        计算CPU资源，特别处理MAC集群的特殊资源类型
+
+        Args:
+            avail_resources: 可用资源字典
+            total_resources: 总资源字典
+            config: 集群配置
+
+        Returns:
+            tuple: (cpu_free, cpu_total)
+        """
+        # 默认使用标准CPU资源
+        cpu_free = avail_resources.get("CPU", 0)
+        cpu_total = total_resources.get("CPU", 0)
+
+        # 对于MAC集群，检查是否有MacCPU资源
+        if "mac" in config.name.lower() or any("mac" in tag.lower() for tag in config.tags):
+            mac_cpu_free = avail_resources.get("MacCPU", 0)
+            mac_cpu_total = total_resources.get("MacCPU", 0)
+
+            # 如果MacCPU资源更大，则使用MacCPU资源
+            if mac_cpu_total > cpu_total:
+                cpu_free = mac_cpu_free
+                cpu_total = mac_cpu_total
+                logger.debug(f"使用MAC特殊CPU资源: 可用={cpu_free}, 总计={cpu_total}")
+
+        return cpu_free, cpu_total
 
     def select_best_cluster(self, required_resources: Dict[str, float] = None) -> Optional[str]:
         """Select the best cluster based on health scores and resource requirements."""

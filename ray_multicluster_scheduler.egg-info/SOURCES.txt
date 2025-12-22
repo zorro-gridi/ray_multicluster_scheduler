@@ -13,6 +13,7 @@ setup.py
 ./demo/demo_job_submission.py
 ./demo/mixed_concurrent_test.py
 ./demo/real_actor_exit_test.py
+./demo/resource_threshold_test.py
 ./demo/simple_actor_test.py
 ./demo/simple_job_test.py
 ./demo/submit_catboost_job.py
@@ -51,6 +52,7 @@ setup.py
 ./ray_multicluster_scheduler/scheduler/monitor/__init__.py
 ./ray_multicluster_scheduler/scheduler/monitor/cluster_monitor.py
 ./ray_multicluster_scheduler/scheduler/policy/__init__.py
+./ray_multicluster_scheduler/scheduler/policy/enhanced_score_based_policy.py
 ./ray_multicluster_scheduler/scheduler/policy/policy_engine.py
 ./ray_multicluster_scheduler/scheduler/policy/score_based_policy.py
 ./ray_multicluster_scheduler/scheduler/policy/tag_affinity_policy.py
@@ -74,6 +76,7 @@ demo/concurrent_task_test.py
 demo/demo_job_submission.py
 demo/mixed_concurrent_test.py
 demo/real_actor_exit_test.py
+demo/resource_threshold_test.py
 demo/simple_actor_test.py
 demo/simple_job_test.py
 demo/submit_catboost_job.py
@@ -118,6 +121,7 @@ ray_multicluster_scheduler/scheduler/lifecycle/task_lifecycle_manager.py
 ray_multicluster_scheduler/scheduler/monitor/__init__.py
 ray_multicluster_scheduler/scheduler/monitor/cluster_monitor.py
 ray_multicluster_scheduler/scheduler/policy/__init__.py
+ray_multicluster_scheduler/scheduler/policy/enhanced_score_based_policy.py
 ray_multicluster_scheduler/scheduler/policy/policy_engine.py
 ray_multicluster_scheduler/scheduler/policy/score_based_policy.py
 ray_multicluster_scheduler/scheduler/policy/tag_affinity_policy.py
@@ -129,3 +133,12 @@ ray_multicluster_scheduler/scheduler/scheduler_core/__init__.py
 ray_multicluster_scheduler/scheduler/scheduler_core/dispatcher.py
 ray_multicluster_scheduler/scheduler/scheduler_core/result_collector.py
 ray_multicluster_scheduler/scheduler/scheduler_core/task_lifecycle.py
+tests/test_concurrent_actor_execution.py
+tests/test_cross_cluster_scheduling.py
+tests/test_cross_cluster_scheduling_fixed.py
+tests/test_mac_cpu_resources.py
+tests/test_real_cluster_connection.py
+tests/test_real_cross_cluster_scheduling.py
+tests/test_resource_calculation.py
+tests/test_resource_threshold_queue.py
+tests/test_submit_task_interface.py

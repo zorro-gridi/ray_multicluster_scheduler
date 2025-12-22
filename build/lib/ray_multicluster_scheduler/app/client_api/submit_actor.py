@@ -67,9 +67,9 @@ def submit_actor(actor_class: Type, args: tuple = (), kwargs: dict = None,
     Returns:
         A tuple containing (task_id, result) where task_id is the unique identifier
         for the submitted actor and result is the actor instance.
-        
+
     Note:
-        This function now supports concurrent actor submissions. Multiple actors can be 
+        This function now supports concurrent actor submissions. Multiple actors can be
         submitted simultaneously without interfering with each other's handles.
 
     Raises:

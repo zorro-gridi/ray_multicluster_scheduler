@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 
 class Dispatcher:
     """Handles dispatching tasks to Ray clusters based on scheduling decisions."""
-    
+
     def __init__(self, policy_engine: PolicyEngine, connection_manager: ConnectionLifecycleManager,
                  circuit_breaker_manager: ClusterCircuitBreakerManager = None):
         self.policy_engine = policy_engine
@@ -66,7 +66,7 @@ class Dispatcher:
                     )
                 else:
                     remote_func = ray.remote(remote_func).options(name=task_desc.name)
-                
+
                 result = remote_func.remote(*task_desc.args, **task_desc.kwargs)
                 return result
 
@@ -94,7 +94,7 @@ class Dispatcher:
             if connection:
                 logger.debug(f"Using existing connection for cluster {cluster_name}")
                 return connection
-            
+
             # 如果没有现有连接，建立新连接
             logger.info(f"Establishing new connection for cluster {cluster_name}")
             cluster_metadata = self.connection_manager.cluster_metadata.get(cluster_name)
@@ -103,24 +103,24 @@ class Dispatcher:
 
             # 构建集群特定的runtime_env配置
             runtime_env = self._build_runtime_env_for_cluster(cluster_metadata)
-            
+
             # 连接到目标集群
             ray_client_address = f"ray://{cluster_metadata.head_address}"
             logger.info(f"Connecting to cluster {cluster_name} at {ray_client_address} with runtime_env: {runtime_env}")
-            
+
             # 使用ignore_reinit_error=True避免重复初始化错误
             ray.init(
                 address=ray_client_address,
                 runtime_env=runtime_env,
                 ignore_reinit_error=True
             )
-            
+
             # 存储连接信息并标记为已连接
             self.cluster_clients[cluster_name] = ray_client_address
             self.connection_manager.mark_cluster_connected(cluster_name)
             logger.info(f"Successfully connected to cluster {cluster_name}")
             return ray_client_address
-            
+
         except Exception as e:
             logger.error(f"Failed to get client for cluster {cluster_name}: {e}")
             # 标记集群连接为断开状态

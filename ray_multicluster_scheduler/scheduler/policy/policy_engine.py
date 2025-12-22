@@ -2,7 +2,7 @@
 
 from typing import Dict, List, Optional
 from ray_multicluster_scheduler.common.model import TaskDescription, SchedulingDecision, ResourceSnapshot, ClusterMetadata
-from ray_multicluster_scheduler.scheduler.policy.score_based_policy import ScoreBasedPolicy
+from ray_multicluster_scheduler.scheduler.policy.enhanced_score_based_policy import EnhancedScoreBasedPolicy
 from ray_multicluster_scheduler.scheduler.policy.tag_affinity_policy import TagAffinityPolicy
 from ray_multicluster_scheduler.common.logging import get_logger
 from ray_multicluster_scheduler.common.exception import PolicyEvaluationError
@@ -21,7 +21,7 @@ class PolicyEngine:
         self.policies = []
 
         # Initialize default policies
-        self.score_policy = ScoreBasedPolicy()
+        self.score_policy = EnhancedScoreBasedPolicy()
         self.tag_policy = TagAffinityPolicy({})  # Will be updated dynamically
 
         # Register default policies
@@ -36,6 +36,9 @@ class PolicyEngine:
             if isinstance(policy, TagAffinityPolicy):
                 self.policies[i] = self.tag_policy
                 break
+
+        # Store cluster metadata for enhanced scoring
+        self._cluster_metadata = cluster_metadata
 
     def add_policy(self, policy):
         """Add a custom policy to the engine."""
@@ -122,7 +125,10 @@ class PolicyEngine:
 
         for policy in self.policies:
             try:
-                decision = policy.evaluate(task_desc, cluster_snapshots)
+                if isinstance(policy, EnhancedScoreBasedPolicy):
+                    decision = policy.evaluate(task_desc, cluster_snapshots, self._cluster_metadata)
+                else:
+                    decision = policy.evaluate(task_desc, cluster_snapshots)
                 policy_decisions.append(decision)
                 logger.debug(f"策略 {policy.__class__.__name__} 决策: {decision}")
             except Exception as e:
@@ -196,7 +202,7 @@ class PolicyEngine:
 
         # If no tag affinity, check score-based policy
         for decision in policy_decisions:
-            if decision.cluster_name and "resource availability" in decision.reason.lower():
+            if decision.cluster_name and ("resource availability" in decision.reason.lower() or "评分策略" in decision.reason.lower() or "增强版评分策略" in decision.reason.lower()):
                 return decision
 
         # Return None to indicate no specific decision was made

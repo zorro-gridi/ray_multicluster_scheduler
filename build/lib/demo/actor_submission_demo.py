@@ -14,7 +14,7 @@ from ray_multicluster_scheduler.app.client_api.unified_scheduler import (
 @ray.remote
 class Train:
     """Example training actor class."""
-    
+
     def __init__(self, model_name="default_model", learning_rate=0.01):
         """Initialize the training actor."""
         self.model_name = model_name
@@ -71,7 +71,7 @@ def demo_actor_submission():
 
         # 3. Use the actor instance to call methods
         print("3. Calling methods on the actor...")
-        
+
         # Get initial status
         status_ref = actor_instance.get_status.remote()
         status = ray.get(status_ref)
