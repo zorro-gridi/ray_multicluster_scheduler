@@ -7,7 +7,6 @@ from ray_multicluster_scheduler.scheduler.connection.connection_lifecycle import
 from ray_multicluster_scheduler.common.circuit_breaker import ClusterCircuitBreakerManager
 from ray_multicluster_scheduler.common.exception import NoHealthyClusterError, TaskSubmissionError
 
-import sys
 
 logger = logging.getLogger(__name__)
 

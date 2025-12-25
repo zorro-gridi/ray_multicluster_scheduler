@@ -1,3 +1,14 @@
+# 一，当前系统集群说明
+# - 1. centos 集群通过 kuberay 部署
+## - 1 个head节点，不执行计算任务，分配 1个cpu
+## - 2 个worker节点，每个节点 8个cpu + 8g内存
+
+#  - 2. mac 集群通过 ray start 启动
+## 8个cpu + 8g内存
+
+# 两个集群独立部署
+
+# 二，集群配置部分参数说明：
 # name: 集群名称
 # head_address: 集群 Head 节点地址
 # dashboard: 集群仪表板地址

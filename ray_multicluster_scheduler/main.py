@@ -48,7 +48,7 @@ def main():
     cluster_registry = ClusterRegistry(metadata_manager, health_checker)
 
     # 4. Connection management
-    connection_manager = ConnectionLifecycleManager(client_pool, cluster_registry)
+    connection_manager = ConnectionLifecycleManager(client_pool)
 
     # Register clusters with connection manager
     for cluster_config in cluster_configs:
@@ -61,8 +61,10 @@ def main():
     cluster_metadata_dict = {cluster.name: cluster for cluster in cluster_configs}
     policy_engine = PolicyEngine(cluster_metadata_dict)
 
-    # 6. Dispatcher
+    # 6. Circuit breaker manager
     circuit_breaker_manager = ClusterCircuitBreakerManager()
+
+    # 7. Dispatcher
     dispatcher = Dispatcher(connection_manager, circuit_breaker_manager)
 
     # 10. Cluster Monitor

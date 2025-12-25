@@ -79,8 +79,7 @@ class Dispatcher:
             traceback.print_exc()
             # 标记集群连接为断开状态
             self.connection_manager.mark_cluster_disconnected(target_cluster)
-            # raise TaskSubmissionError(f"Failed to submit task {task_desc.task_id} to cluster {target_cluster}: {e}")
-            sys.exit(1)
+            raise TaskSubmissionError(f"Failed to submit task {task_desc.task_id} to cluster {target_cluster}: {e}")
 
     def _get_cluster_client(self, cluster_name: str) -> Any:
         """获取指定集群的客户端连接，支持多集群并发"""

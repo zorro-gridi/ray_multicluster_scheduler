@@ -44,7 +44,6 @@ setup.py
 ./ray_multicluster_scheduler/scheduler/scheduler_core/__init__.py
 ./ray_multicluster_scheduler/scheduler/scheduler_core/dispatcher.py
 ./ray_multicluster_scheduler/scheduler/scheduler_core/result_collector.py
-./ray_multicluster_scheduler/scheduler/scheduler_core/task_lifecycle.py
 ray_multicluster_scheduler/__init__.py
 ray_multicluster_scheduler/main.py
 ray_multicluster_scheduler.egg-info/PKG-INFO
@@ -94,5 +93,4 @@ ray_multicluster_scheduler/scheduler/queue/task_queue.py
 ray_multicluster_scheduler/scheduler/scheduler_core/__init__.py
 ray_multicluster_scheduler/scheduler/scheduler_core/dispatcher.py
 ray_multicluster_scheduler/scheduler/scheduler_core/result_collector.py
-ray_multicluster_scheduler/scheduler/scheduler_core/task_lifecycle.py
 tests/test_multi_cluster_distributed_scheduling.py

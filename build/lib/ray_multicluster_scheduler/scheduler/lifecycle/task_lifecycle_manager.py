@@ -28,8 +28,6 @@ class TaskLifecycleManager:
         self.connection_manager = ConnectionLifecycleManager(self.client_pool)
         self.dispatcher = Dispatcher(self.connection_manager)
         self.task_queue = TaskQueue()
-        # 注释掉不存在的模块
-        # self.backpressure_controller = BackpressureController()
         self.running = False
         self.worker_thread = None
         self._initialized = False
