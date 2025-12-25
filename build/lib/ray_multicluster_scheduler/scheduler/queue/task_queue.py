@@ -5,15 +5,16 @@ Task queue implementation for the ray multicluster scheduler.
 import threading
 import time
 from collections import deque, defaultdict
-from typing import Optional
+from typing import Optional, Union, List
 from ray_multicluster_scheduler.common.model import TaskDescription
+from ray_multicluster_scheduler.common.model.job_description import JobDescription
 from ray_multicluster_scheduler.common.logging import get_logger
 
 logger = get_logger(__name__)
 
 
 class TaskQueue:
-    """A task queue implementation with both global and per-cluster queues."""
+    """A task queue implementation with both global and per-cluster queues, supporting both Task and Job types."""
 
     def __init__(self, max_size: int = 1000):
         """
@@ -25,6 +26,9 @@ class TaskQueue:
         self.max_size = max_size
         self.global_queue = deque()  # Global queue for tasks not tied to specific cluster
         self.cluster_queues = defaultdict(deque)  # Per-cluster queues
+        # New: Job queues for JobSubmissionClient tasks
+        self.global_job_queue = deque()  # Global queue for jobs not tied to specific cluster
+        self.cluster_job_queues = defaultdict(deque)  # Per-cluster job queues
         self.lock = threading.Lock()
         self.condition = threading.Condition(self.lock)
 
@@ -48,6 +52,26 @@ class TaskQueue:
             self.condition.notify()  # Notify waiting threads that a task is available
             return True
 
+    def enqueue_global_job(self, job_desc: JobDescription) -> bool:
+        """
+        Add a job to the global job queue.
+
+        Args:
+            job_desc: The job description to enqueue
+
+        Returns:
+            True if the job was successfully enqueued, False if the queue is full
+        """
+        with self.condition:
+            if len(self.global_job_queue) >= self.max_size:
+                logger.warning(f"全局作业队列已满，无法添加作业 {job_desc.job_id}")
+                return False
+
+            self.global_job_queue.append(job_desc)
+            logger.info(f"作业 {job_desc.job_id} 已加入全局作业队列，当前全局作业队列大小: {len(self.global_job_queue)}")
+            self.condition.notify()  # Notify waiting threads that a job is available
+            return True
+
     def enqueue_cluster(self, task_desc: TaskDescription, cluster_name: str) -> bool:
         """
         Add a task to a specific cluster's queue.
@@ -64,6 +88,24 @@ class TaskQueue:
             logger.info(f"任务 {task_desc.task_id} 已加入集群 {cluster_name} 的队列，"
                        f"当前 {cluster_name} 队列大小: {len(self.cluster_queues[cluster_name])}")
             self.condition.notify()  # Notify waiting threads that a task is available
+            return True
+
+    def enqueue_cluster_job(self, job_desc: JobDescription, cluster_name: str) -> bool:
+        """
+        Add a job to a specific cluster's job queue.
+
+        Args:
+            job_desc: The job description to enqueue
+            cluster_name: The name of the cluster queue to add to
+
+        Returns:
+            True if the job was successfully enqueued
+        """
+        with self.condition:
+            self.cluster_job_queues[cluster_name].append(job_desc)
+            logger.info(f"作业 {job_desc.job_id} 已加入集群 {cluster_name} 的作业队列，"
+                       f"当前 {cluster_name} 作业队列大小: {len(self.cluster_job_queues[cluster_name])}")
+            self.condition.notify()  # Notify waiting threads that a job is available
             return True
 
     def enqueue(self, task_desc: TaskDescription, cluster_name: str = None) -> bool:
@@ -83,6 +125,23 @@ class TaskQueue:
         else:
             return self.enqueue_global(task_desc)
 
+    def enqueue_job(self, job_desc: JobDescription, cluster_name: str = None) -> bool:
+        """
+        Add a job to the appropriate queue.
+        If cluster_name is provided, add to that cluster's job queue; otherwise add to global job queue.
+
+        Args:
+            job_desc: The job description to enqueue
+            cluster_name: Optional cluster name for cluster-specific queue
+
+        Returns:
+            True if the job was successfully enqueued
+        """
+        if cluster_name:
+            return self.enqueue_cluster_job(job_desc, cluster_name)
+        else:
+            return self.enqueue_global_job(job_desc)
+
     def dequeue_from_cluster(self, cluster_name: str) -> Optional[TaskDescription]:
         """
         Remove and return a task from a specific cluster's queue.
@@ -99,6 +158,24 @@ class TaskQueue:
                 logger.info(f"任务 {task_desc.task_id} 已从集群 {cluster_name} 队列中取出，"
                            f"剩余 {cluster_name} 队列大小: {len(self.cluster_queues[cluster_name])}")
                 return task_desc
+            return None
+
+    def dequeue_from_cluster_job(self, cluster_name: str) -> Optional[JobDescription]:
+        """
+        Remove and return a job from a specific cluster's job queue.
+
+        Args:
+            cluster_name: The name of the cluster job queue to dequeue from
+
+        Returns:
+            The oldest job in the cluster job queue, or None if the queue is empty
+        """
+        with self.condition:
+            if cluster_name in self.cluster_job_queues and self.cluster_job_queues[cluster_name]:
+                job_desc = self.cluster_job_queues[cluster_name].popleft()
+                logger.info(f"作业 {job_desc.job_id} 已从集群 {cluster_name} 作业队列中取出，"
+                           f"剩余 {cluster_name} 作业队列大小: {len(self.cluster_job_queues[cluster_name])}")
+                return job_desc
             return None
 
     def dequeue_global(self) -> Optional[TaskDescription]:
@@ -118,6 +195,24 @@ class TaskQueue:
             task_desc = self.global_queue.popleft()
             logger.info(f"任务 {task_desc.task_id} 已从全局队列中取出，剩余全局队列大小: {len(self.global_queue)}")
             return task_desc
+
+    def dequeue_global_job(self) -> Optional[JobDescription]:
+        """
+        Remove and return a job from the global job queue.
+
+        Returns:
+            The oldest job in the global job queue, or None if the queue is empty
+        """
+        with self.condition:
+            # Wait for a job to become available if the queue is empty
+            while len(self.global_job_queue) == 0:
+                # Wait for 1 second and check again to avoid indefinite blocking
+                if not self.condition.wait(timeout=1.0):
+                    return None
+
+            job_desc = self.global_job_queue.popleft()
+            logger.info(f"作业 {job_desc.job_id} 已从全局作业队列中取出，剩余全局作业队列大小: {len(self.global_job_queue)}")
+            return job_desc
 
     def dequeue(self, cluster_name: str = None) -> Optional[TaskDescription]:
         """
@@ -143,9 +238,33 @@ class TaskQueue:
         else:
             return self.dequeue_global()
 
+    def dequeue_job(self, cluster_name: str = None) -> Optional[JobDescription]:
+        """
+        Remove and return a job from the appropriate queue.
+        If cluster_name is provided, try to dequeue from that cluster's job queue;
+        otherwise, dequeue from the global job queue.
+
+        Args:
+            cluster_name: Optional cluster name for cluster-specific dequeue
+
+        Returns:
+            The oldest job in the specified queue, or None if the queue is empty
+        """
+        if cluster_name:
+            # First try to get from the specific cluster job queue
+            job = self.dequeue_from_cluster_job(cluster_name)
+            if job:
+                return job
+            # If cluster job queue is empty, try global job queue as fallback
+            if self.global_job_queue:
+                return self.dequeue_global_job()
+            return None
+        else:
+            return self.dequeue_global_job()
+
     def size(self, cluster_name: str = None) -> int:
         """
-        Get the current size of the queue.
+        Get the current size of the task queue.
         If cluster_name is provided, return size of that cluster's queue; otherwise return global queue size.
 
         Args:
@@ -160,9 +279,26 @@ class TaskQueue:
             else:
                 return len(self.global_queue)
 
+    def job_size(self, cluster_name: str = None) -> int:
+        """
+        Get the current size of the job queue.
+        If cluster_name is provided, return size of that cluster's job queue; otherwise return global job queue size.
+
+        Args:
+            cluster_name: Optional cluster name for cluster-specific size
+
+        Returns:
+            The number of jobs currently in the specified queue
+        """
+        with self.lock:
+            if cluster_name:
+                return len(self.cluster_job_queues[cluster_name])
+            else:
+                return len(self.global_job_queue)
+
     def total_size(self) -> int:
         """
-        Get the total size of all queues (global + all cluster queues).
+        Get the total size of all task queues (global + all cluster queues).
 
         Returns:
             The total number of tasks in all queues
@@ -173,9 +309,31 @@ class TaskQueue:
                 total += len(cluster_queue)
             return total
 
+    def total_job_size(self) -> int:
+        """
+        Get the total size of all job queues (global + all cluster job queues).
+
+        Returns:
+            The total number of jobs in all queues
+        """
+        with self.lock:
+            total = len(self.global_job_queue)
+            for cluster_job_queue in self.cluster_job_queues.values():
+                total += len(cluster_job_queue)
+            return total
+
+    def total_combined_size(self) -> int:
+        """
+        Get the total size of all queues (task queues + job queues).
+
+        Returns:
+            The total number of tasks and jobs in all queues
+        """
+        return self.total_size() + self.total_job_size()
+
     def is_empty(self, cluster_name: str = None) -> bool:
         """
-        Check if the specified queue is empty.
+        Check if the specified task queue is empty.
         If cluster_name is provided, check that cluster's queue; otherwise check global queue.
 
         Args:
@@ -190,6 +348,23 @@ class TaskQueue:
             else:
                 return len(self.global_queue) == 0
 
+    def is_job_empty(self, cluster_name: str = None) -> bool:
+        """
+        Check if the specified job queue is empty.
+        If cluster_name is provided, check that cluster's job queue; otherwise check global job queue.
+
+        Args:
+            cluster_name: Optional cluster name for cluster-specific check
+
+        Returns:
+            True if the specified job queue is empty, False otherwise
+        """
+        with self.lock:
+            if cluster_name:
+                return len(self.cluster_job_queues[cluster_name]) == 0
+            else:
+                return len(self.global_job_queue) == 0
+
     def clear(self, cluster_name: str = None):
         """Clear all tasks from the specified queue.
         If cluster_name is provided, clear that cluster's queue; otherwise clear global queue."""
@@ -203,7 +378,25 @@ class TaskQueue:
                 self.global_queue.clear()
                 logger.info(f"已清空全局任务队列，清除 {cleared_count} 个任务")
 
+    def clear_jobs(self, cluster_name: str = None):
+        """Clear all jobs from the specified queue.
+        If cluster_name is provided, clear that cluster's job queue; otherwise clear global job queue."""
+        with self.lock:
+            if cluster_name:
+                cleared_count = len(self.cluster_job_queues[cluster_name])
+                self.cluster_job_queues[cluster_name].clear()
+                logger.info(f"已清空集群 {cluster_name} 作业队列，清除 {cleared_count} 个作业")
+            else:
+                cleared_count = len(self.global_job_queue)
+                self.global_job_queue.clear()
+                logger.info(f"已清空全局作业队列，清除 {cleared_count} 个作业")
+
     def get_cluster_queue_names(self) -> list:
         """Get a list of all cluster queue names that have tasks."""
         with self.lock:
             return [name for name, queue in self.cluster_queues.items() if len(queue) > 0]
+
+    def get_cluster_job_queue_names(self) -> list:
+        """Get a list of all cluster job queue names that have jobs."""
+        with self.lock:
+            return [name for name, queue in self.cluster_job_queues.items() if len(queue) > 0]

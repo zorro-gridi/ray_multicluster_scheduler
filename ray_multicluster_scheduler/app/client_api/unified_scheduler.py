@@ -13,6 +13,7 @@ from ray_multicluster_scheduler.scheduler.lifecycle.task_lifecycle_manager impor
 from ray_multicluster_scheduler.scheduler.monitor.cluster_monitor import ClusterMonitor
 from ray_multicluster_scheduler.scheduler.health.health_checker import HealthChecker
 from ray_multicluster_scheduler.common.model import ClusterMetadata
+from ray_multicluster_scheduler.common.model.job_description import JobDescription
 
 # Configure logging with default INFO level if not already configured
 try:
@@ -93,6 +94,9 @@ class UnifiedScheduler:
             self.task_lifecycle_manager = TaskLifecycleManager(
                 cluster_monitor=cluster_monitor
             )
+
+            # Initialize job client pool in connection manager
+            self.task_lifecycle_manager.connection_manager.initialize_job_client_pool(cluster_monitor.config_manager)
 
             # Display cluster information and resource usage
             self._display_cluster_info(cluster_monitor)
@@ -360,6 +364,83 @@ class UnifiedScheduler:
             traceback.print_exc()
             raise
 
+    def submit_job(
+        self,
+        entrypoint: str,
+        runtime_env: Optional[Dict] = None,
+        job_id: Optional[str] = None,
+        metadata: Optional[Dict] = None,
+        submission_id: Optional[str] = None,
+        preferred_cluster: Optional[str] = None,
+        resource_requirements: Optional[Dict[str, float]] = None,
+        tags: Optional[List[str]] = None
+    ) -> str:
+        """
+        Submit a job to the multicluster scheduler using JobSubmissionClient.
+
+        This method provides a simplified interface for submitting jobs to the scheduler.
+        The scheduler will automatically handle cluster selection, resource allocation,
+        and job execution across available Ray clusters using JobSubmissionClient.
+
+        Args:
+            entrypoint (str): The command to run in the job (e.g., "python train.py")
+            runtime_env (Dict, optional): Runtime environment for the job
+            job_id (str, optional): Unique identifier for the job
+            metadata (Dict, optional): Metadata to associate with the job
+            submission_id (str, optional): Submission ID for tracking
+            preferred_cluster (str, optional): Preferred cluster name for job execution
+            resource_requirements (Dict[str, float], optional): Resource requirements for the job
+            tags (List[str], optional): List of tags to associate with the job
+
+        Returns:
+            str: Job ID of the submitted job
+
+        Raises:
+            RuntimeError: If the scheduler is not initialized or job submission fails
+        """
+        # 如果调度器未初始化，尝试惰性初始化
+        if not self.task_lifecycle_manager:
+            try:
+                self.initialize_environment(config_file_path=self.__class__._config_file_path)
+            except Exception as e:
+                logger.error(f"Failed to lazily initialize scheduler: {e}")
+                import traceback
+                traceback.print_exc()
+                raise RuntimeError("Scheduler environment not initialized. Call initialize_environment() first.")
+
+        try:
+            logger.info(f"Submitting job: {job_id or 'auto-generated'}")
+
+            # Create job description
+            job_desc = JobDescription(
+                job_id=job_id,
+                entrypoint=entrypoint,
+                runtime_env=runtime_env,
+                metadata=metadata,
+                submission_id=submission_id,
+                preferred_cluster=preferred_cluster,
+                resource_requirements=resource_requirements,
+                tags=tags
+            )
+
+            # Submit job using the task lifecycle manager
+            job_id_result = self.task_lifecycle_manager.submit_job(job_desc)
+
+            # When a job is submitted, ensure the health checker is running
+            if self._health_checker_stop_event.is_set():
+                # Restart the health checker if it was stopped
+                cluster_monitor = self.task_lifecycle_manager.cluster_monitor if self.task_lifecycle_manager else None
+                if cluster_monitor:
+                    self._start_health_checker_thread(cluster_monitor)
+
+            logger.info(f"Job {job_id or 'auto-generated'} submitted successfully with job_id: {job_id_result}")
+            return job_id_result
+        except Exception as e:
+            logger.error(f"Failed to submit job {job_id or 'auto-generated'}: {e}")
+            import traceback
+            traceback.print_exc()
+            raise
+
     def submit_actor(
         self,
         actor_class: Type,
@@ -440,6 +521,29 @@ class UnifiedScheduler:
             traceback.print_exc()
             raise
 
+    def list_clusters(self) -> List[str]:
+        """
+        List all available clusters in the scheduler.
+
+        Returns:
+            List[str]: List of cluster names that are available in the scheduler
+        """
+        if not self.task_lifecycle_manager:
+            try:
+                self.initialize_environment(config_file_path=self.__class__._config_file_path)
+            except Exception as e:
+                logger.error(f"Failed to initialize scheduler to list clusters: {e}")
+                return []
+
+        try:
+            # Get cluster information from the cluster monitor
+            cluster_info = self.task_lifecycle_manager.cluster_monitor.get_all_cluster_info()
+            return list(cluster_info.keys())
+        except Exception as e:
+            logger.error(f"Failed to list clusters: {e}")
+            return []
+
+
 
 # Global unified scheduler instance
 _unified_scheduler = None
@@ -485,7 +589,7 @@ def initialize_scheduler_environment(config_file_path: Optional[str] = None) -> 
         scheduler = get_unified_scheduler()
         task_lifecycle_manager = scheduler.initialize_environment(config_file_path=config_file_path)
 
-        # 同步初始化submit_task和submit_actor模块中的调度器，确保它们使用相同的配置
+        # 同步初始化submit_task、submit_actor和submit_job模块中的调度器，确保它们使用相同的配置
         try:
             from ray_multicluster_scheduler.app.client_api.submit_task import initialize_scheduler as init_task_scheduler
             init_task_scheduler(task_lifecycle_manager)
@@ -497,6 +601,12 @@ def initialize_scheduler_environment(config_file_path: Optional[str] = None) -> 
             init_actor_scheduler(task_lifecycle_manager)
         except Exception as e:
             logger.warning(f"Failed to initialize submit_actor scheduler: {e}")
+
+        try:
+            from ray_multicluster_scheduler.app.client_api.submit_job import initialize_scheduler as init_job_scheduler
+            init_job_scheduler(task_lifecycle_manager)
+        except Exception as e:
+            logger.warning(f"Failed to initialize submit_job scheduler: {e}")
 
         return task_lifecycle_manager
     except Exception as e:
@@ -557,6 +667,58 @@ def submit_task(
         traceback_str = traceback.format_exc()
         logger.error(f"Traceback:\n{traceback_str}")
         raise Exception(f"Failed to submit task {name}: {e}\nFull traceback:\n{traceback_str}")
+
+
+def submit_job(
+    entrypoint: str,
+    runtime_env: Optional[Dict] = None,
+    job_id: Optional[str] = None,
+    metadata: Optional[Dict] = None,
+    submission_id: Optional[str] = None,
+    preferred_cluster: Optional[str] = None,
+    resource_requirements: Optional[Dict[str, float]] = None,
+    tags: Optional[List[str]] = None
+) -> str:
+    """
+    Submit a job to the multicluster scheduler using JobSubmissionClient.
+
+    This is a convenience function that submits a job to the scheduler
+    using the unified scheduler interface.
+
+    Args:
+        entrypoint (str): The command to run in the job (e.g., "python train.py")
+        runtime_env (Dict, optional): Runtime environment for the job
+        job_id (str, optional): Unique identifier for the job
+        metadata (Dict, optional): Metadata to associate with the job
+        submission_id (str, optional): Submission ID for tracking
+        preferred_cluster (str, optional): Preferred cluster name for job execution
+        resource_requirements (Dict[str, float], optional): Resource requirements for the job
+        tags (List[str], optional): List of tags to associate with the job
+
+    Returns:
+        str: Job ID of the submitted job
+
+    Raises:
+        RuntimeError: If the scheduler is not initialized or job submission fails
+    """
+    try:
+        scheduler = get_unified_scheduler()
+        return scheduler.submit_job(
+            entrypoint=entrypoint,
+            runtime_env=runtime_env,
+            job_id=job_id,
+            metadata=metadata,
+            submission_id=submission_id,
+            preferred_cluster=preferred_cluster,
+            resource_requirements=resource_requirements,
+            tags=tags
+        )
+    except Exception as e:
+        logger.error(f"Failed to submit job {job_id or 'auto-generated'}: {e}")
+        import traceback
+        traceback_str = traceback.format_exc()
+        logger.error(f"Traceback:\n{traceback_str}")
+        raise Exception(f"Failed to submit job {job_id or 'auto-generated'}: {e}\nFull traceback:\n{traceback_str}")
 
 
 def submit_actor(

@@ -2,6 +2,7 @@
 
 from typing import Dict, List, Optional
 from ray_multicluster_scheduler.common.model import TaskDescription, SchedulingDecision, ResourceSnapshot, ClusterMetadata
+from ray_multicluster_scheduler.common.model.job_description import JobDescription
 from ray_multicluster_scheduler.scheduler.policy.enhanced_score_based_policy import EnhancedScoreBasedPolicy
 from ray_multicluster_scheduler.scheduler.policy.tag_affinity_policy import TagAffinityPolicy
 from ray_multicluster_scheduler.common.logging import get_logger
@@ -51,6 +52,16 @@ class PolicyEngine:
 
     def schedule(self, task_desc: TaskDescription, cluster_snapshots: Dict[str, ResourceSnapshot]) -> SchedulingDecision:
         """Evaluate all policies and make a scheduling decision according to specified rules."""
+        return self._make_scheduling_decision(task_desc, cluster_snapshots)
+
+    def schedule_job(self, job_desc: JobDescription, cluster_snapshots: Dict[str, ResourceSnapshot]) -> SchedulingDecision:
+        """Schedule a job using the same policies as tasks, by converting the job to a task description."""
+        # Convert job description to task description to reuse existing scheduling logic
+        task_desc = job_desc.as_task_description()
+        return self._make_scheduling_decision(task_desc, cluster_snapshots)
+
+    def _make_scheduling_decision(self, task_desc: TaskDescription, cluster_snapshots: Dict[str, ResourceSnapshot]) -> SchedulingDecision:
+        """Internal method to make scheduling decisions for both tasks and jobs."""
 
         # Rule 1: When preferred_cluster is specified, prioritize that cluster
         if task_desc.preferred_cluster:

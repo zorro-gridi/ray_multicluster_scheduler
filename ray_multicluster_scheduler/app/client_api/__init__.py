@@ -2,6 +2,7 @@
 
 from .submit_task import initialize_scheduler, submit_task
 from .submit_actor import initialize_scheduler as initialize_actor_scheduler, submit_actor
+from .submit_job import initialize_scheduler as initialize_job_scheduler, submit_job, get_job_status
 from .unified_scheduler import (
     UnifiedScheduler,
     get_unified_scheduler,
@@ -13,8 +14,11 @@ from .unified_scheduler import (
 __all__ = [
     "initialize_scheduler",
     "initialize_actor_scheduler",
+    "initialize_job_scheduler",
     "submit_task",
     "submit_actor",
+    "submit_job",
+    "get_job_status",
     "UnifiedScheduler",
     "get_unified_scheduler",
     "initialize_scheduler_environment",

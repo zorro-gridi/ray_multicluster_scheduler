@@ -33,7 +33,7 @@ class EnhancedScoreBasedPolicy:
             # 使用新的资源指标
             cpu_total_cores = snapshot.cluster_cpu_total_cores
             cpu_used_cores = snapshot.cluster_cpu_used_cores
-            cpu_free = cpu_total_cores - cpu_used_cores
+            cpu_free = round(cpu_total_cores - cpu_used_cores, 1)
             cpu_total = cpu_total_cores
 
             # 内存资源指标

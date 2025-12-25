@@ -6,6 +6,7 @@ setup.py
 ./ray_multicluster_scheduler/app/__init__.py
 ./ray_multicluster_scheduler/app/client_api/__init__.py
 ./ray_multicluster_scheduler/app/client_api/submit_actor.py
+./ray_multicluster_scheduler/app/client_api/submit_job.py
 ./ray_multicluster_scheduler/app/client_api/submit_task.py
 ./ray_multicluster_scheduler/app/client_api/unified_scheduler.py
 ./ray_multicluster_scheduler/common/__init__.py
@@ -13,6 +14,7 @@ setup.py
 ./ray_multicluster_scheduler/common/exception/__init__.py
 ./ray_multicluster_scheduler/common/logging/__init__.py
 ./ray_multicluster_scheduler/common/model/__init__.py
+./ray_multicluster_scheduler/common/model/job_description.py
 ./ray_multicluster_scheduler/control_plane/__init__.py
 ./ray_multicluster_scheduler/control_plane/admin_api/__init__.py
 ./ray_multicluster_scheduler/control_plane/config/__init__.py
@@ -23,6 +25,7 @@ setup.py
 ./ray_multicluster_scheduler/scheduler/cluster/cluster_registry.py
 ./ray_multicluster_scheduler/scheduler/connection/__init__.py
 ./ray_multicluster_scheduler/scheduler/connection/connection_lifecycle.py
+./ray_multicluster_scheduler/scheduler/connection/job_client_pool.py
 ./ray_multicluster_scheduler/scheduler/connection/ray_client_pool.py
 ./ray_multicluster_scheduler/scheduler/health/__init__.py
 ./ray_multicluster_scheduler/scheduler/health/health_checker.py
@@ -55,6 +58,7 @@ ray_multicluster_scheduler.egg-info/top_level.txt
 ray_multicluster_scheduler/app/__init__.py
 ray_multicluster_scheduler/app/client_api/__init__.py
 ray_multicluster_scheduler/app/client_api/submit_actor.py
+ray_multicluster_scheduler/app/client_api/submit_job.py
 ray_multicluster_scheduler/app/client_api/submit_task.py
 ray_multicluster_scheduler/app/client_api/unified_scheduler.py
 ray_multicluster_scheduler/common/__init__.py
@@ -62,6 +66,7 @@ ray_multicluster_scheduler/common/circuit_breaker.py
 ray_multicluster_scheduler/common/exception/__init__.py
 ray_multicluster_scheduler/common/logging/__init__.py
 ray_multicluster_scheduler/common/model/__init__.py
+ray_multicluster_scheduler/common/model/job_description.py
 ray_multicluster_scheduler/control_plane/__init__.py
 ray_multicluster_scheduler/control_plane/admin_api/__init__.py
 ray_multicluster_scheduler/control_plane/config/__init__.py
@@ -72,6 +77,7 @@ ray_multicluster_scheduler/scheduler/cluster/cluster_metadata.py
 ray_multicluster_scheduler/scheduler/cluster/cluster_registry.py
 ray_multicluster_scheduler/scheduler/connection/__init__.py
 ray_multicluster_scheduler/scheduler/connection/connection_lifecycle.py
+ray_multicluster_scheduler/scheduler/connection/job_client_pool.py
 ray_multicluster_scheduler/scheduler/connection/ray_client_pool.py
 ray_multicluster_scheduler/scheduler/health/__init__.py
 ray_multicluster_scheduler/scheduler/health/health_checker.py
@@ -93,4 +99,5 @@ ray_multicluster_scheduler/scheduler/queue/task_queue.py
 ray_multicluster_scheduler/scheduler/scheduler_core/__init__.py
 ray_multicluster_scheduler/scheduler/scheduler_core/dispatcher.py
 ray_multicluster_scheduler/scheduler/scheduler_core/result_collector.py
+tests/test_job_submission.py
 tests/test_multi_cluster_distributed_scheduling.py

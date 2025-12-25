@@ -349,7 +349,7 @@ class HealthChecker:
                 home_dir = env_vars.get('home_dir', '未设置')
             logger.info(f"  Home目录: {home_dir}")
 
-            logger.info(f"  评分: {score}")
+            # logger.info(f"  评分: {score}")
             logger.info(f"  标签: {', '.join(tags)}")
 
             if health.resources:

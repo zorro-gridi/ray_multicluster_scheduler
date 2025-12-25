@@ -228,22 +228,61 @@ def get_cluster_level_stats(cluster_name: str = None, ray_client_pool=None) -> D
                 "cluster_mem_total_mb": 0.0,
             }
 
-        pg = placement_group([{"CPU": 0.001}] * len(alive), strategy="SPREAD")
-        ray.get(pg.ready())
+        # 尝试创建placement group，如果失败则返回默认值
+        try:
+            pg = placement_group([{"CPU": 0.001}] * len(alive), strategy="SPREAD")
+            ray.get(pg.ready(), timeout=30)  # 设置30秒超时
 
-        monitors = [
-            NodeMonitor.options(
-                placement_group=pg,
-                placement_group_bundle_index=i,
-            ).remote()
-            for i in range(len(alive))
-        ]
+            monitors = [
+                NodeMonitor.options(
+                    placement_group=pg,
+                    placement_group_bundle_index=i,
+                ).remote()
+                for i in range(len(alive))
+            ]
 
-        node_stats = ray.get([m.get_node_usage.remote() for m in monitors])
-        logger.debug(f"Node stats collected: {len(node_stats)} nodes")
+            node_stats = ray.get([m.get_node_usage.remote() for m in monitors], timeout=30)  # 设置30秒超时
+            logger.debug(f"Node stats collected: {len(node_stats)} nodes")
 
-        cluster_stats = aggregate_cluster_usage(node_stats)
-        logger.debug(f"Cluster stats: {cluster_stats}")
+            cluster_stats = aggregate_cluster_usage(node_stats)
+            logger.debug(f"Cluster stats: {cluster_stats}")
+        except ray.exceptions.RaySystemError as e:
+            logger.warning(f"Ray system error during resource collection: {e}")
+            # 如果是Ray系统错误，返回默认值而不是抛出异常
+            cluster_stats = {
+                "cluster_cpu_usage_percent": 0.0,
+                "cluster_mem_usage_percent": 0.0,
+                "cluster_cpu_used_cores": 0.0,
+                "cluster_cpu_total_cores": 0.0,
+                "cluster_mem_used_mb": 0.0,
+                "cluster_mem_total_mb": 0.0,
+            }
+        except Exception as e:
+            # 检查是否是连接相关的错误
+            if "Channel closed" in str(e) or "connection" in str(e).lower():
+                logger.warning(f"Connection error during resource collection: {e}")
+                # 对于连接错误，返回默认值而不是抛出异常
+                cluster_stats = {
+                    "cluster_cpu_usage_percent": 0.0,
+                    "cluster_mem_usage_percent": 0.0,
+                    "cluster_cpu_used_cores": 0.0,
+                    "cluster_cpu_total_cores": 0.0,
+                    "cluster_mem_used_mb": 0.0,
+                    "cluster_mem_total_mb": 0.0,
+                }
+            else:
+                logger.error(f"Unexpected error in get_cluster_level_stats: {e}")
+                import traceback
+                traceback.print_exc()
+                # Return default values in case of error
+                cluster_stats = {
+                    "cluster_cpu_usage_percent": 0.0,
+                    "cluster_mem_usage_percent": 0.0,
+                    "cluster_cpu_used_cores": 0.0,
+                    "cluster_cpu_total_cores": 0.0,
+                    "cluster_mem_used_mb": 0.0,
+                    "cluster_mem_total_mb": 0.0,
+                }
 
     except Exception as e:
         logger.error(f"Error in get_cluster_level_stats: {e}")
@@ -292,21 +331,36 @@ def get_node_level_stats(cluster_name: str = None, ray_client_pool=None) -> List
         if len(alive) == 0:
             logger.warning("No alive nodes found for node-level stats")
         else:
-            pg = placement_group([{"CPU": 0.001}] * len(alive), strategy="SPREAD")
-            ray.get(pg.ready())
+            # 尝试创建placement group，如果失败则跳过统计
+            try:
+                pg = placement_group([{"CPU": 0.001}] * len(alive), strategy="SPREAD")
+                ray.get(pg.ready(), timeout=30)  # 设置30秒超时
 
-            monitors = [
-                NodeMonitor.options(
-                    placement_group=pg,
-                    placement_group_bundle_index=i,
-                ).remote()
-                for i in range(len(alive))
-            ]
+                monitors = [
+                    NodeMonitor.options(
+                        placement_group=pg,
+                        placement_group_bundle_index=i,
+                    ).remote()
+                    for i in range(len(alive))
+                ]
 
-            node_stats = ray.get([m.get_node_usage.remote() for m in monitors])
-            logger.debug(f"Node stats collected: {len(node_stats)} nodes")
+                node_stats = ray.get([m.get_node_usage.remote() for m in monitors], timeout=30)  # 设置30秒超时
+                logger.debug(f"Node stats collected: {len(node_stats)} nodes")
 
-            result = node_stats
+                result = node_stats
+            except ray.exceptions.RaySystemError as e:
+                logger.warning(f"Ray system error during node-level resource collection: {e}")
+                result = []  # 返回空列表而不是抛出异常
+            except Exception as e:
+                # 检查是否是连接相关的错误
+                if "Channel closed" in str(e) or "connection" in str(e).lower():
+                    logger.warning(f"Connection error during node-level resource collection: {e}")
+                    result = []  # 返回空列表而不是抛出异常
+                else:
+                    logger.error(f"Unexpected error in get_node_level_stats: {e}")
+                    import traceback
+                    traceback.print_exc()
+                    result = []  # 返回空列表而不是抛出异常
     except Exception as e:
         logger.error(f"Error in get_node_level_stats: {e}")
         import traceback
@@ -345,21 +399,36 @@ def get_worker_level_stats(cluster_name: str = None, ray_client_pool=None) -> Li
         if len(alive) == 0:
             logger.warning("No alive nodes found for worker-level stats")
         else:
-            pg = placement_group([{"CPU": 0.001}] * len(alive), strategy="SPREAD")
-            ray.get(pg.ready())
+            # 尝试创建placement group，如果失败则跳过统计
+            try:
+                pg = placement_group([{"CPU": 0.001}] * len(alive), strategy="SPREAD")
+                ray.get(pg.ready(), timeout=30)  # 设置30秒超时
 
-            monitors = [
-                NodeMonitor.options(
-                    placement_group=pg,
-                    placement_group_bundle_index=i,
-                ).remote()
-                for i in range(len(alive))
-            ]
+                monitors = [
+                    NodeMonitor.options(
+                        placement_group=pg,
+                        placement_group_bundle_index=i,
+                    ).remote()
+                    for i in range(len(alive))
+                ]
 
-            worker_stats = ray.get([m.get_worker_usage.remote() for m in monitors])
-            logger.debug(f"Worker stats collected: {len(worker_stats)} nodes")
+                worker_stats = ray.get([m.get_worker_usage.remote() for m in monitors], timeout=30)  # 设置30秒超时
+                logger.debug(f"Worker stats collected: {len(worker_stats)} nodes")
 
-            result = worker_stats
+                result = worker_stats
+            except ray.exceptions.RaySystemError as e:
+                logger.warning(f"Ray system error during worker-level resource collection: {e}")
+                result = []  # 返回空列表而不是抛出异常
+            except Exception as e:
+                # 检查是否是连接相关的错误
+                if "Channel closed" in str(e) or "connection" in str(e).lower():
+                    logger.warning(f"Connection error during worker-level resource collection: {e}")
+                    result = []  # 返回空列表而不是抛出异常
+                else:
+                    logger.error(f"Unexpected error in get_worker_level_stats: {e}")
+                    import traceback
+                    traceback.print_exc()
+                    result = []  # 返回空列表而不是抛出异常
     except Exception as e:
         logger.error(f"Error in get_worker_level_stats: {e}")
         import traceback
