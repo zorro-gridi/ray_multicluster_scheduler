@@ -6,6 +6,7 @@ from typing import Dict, Optional, Any
 from ray_multicluster_scheduler.common.model import ClusterMetadata
 from ray_multicluster_scheduler.scheduler.connection.ray_client_pool import RayClientPool
 from ray_multicluster_scheduler.common.logging import get_logger
+from ray_multicluster_scheduler.scheduler.cluster.cluster_manager import ClusterManager
 
 logger = get_logger(__name__)
 
@@ -52,6 +53,14 @@ class ConnectionLifecycleManager:
         else:
             logger.warning(f"Connection to cluster {cluster_name} is invalid or not established")
             return None
+
+    def ensure_cluster_connection(self, cluster_name: str) -> bool:
+        """Ensure we are connected to the specified cluster, connecting if necessary."""
+        return self.client_pool.ensure_cluster_connection(cluster_name)
+
+    def establish_ray_connection(self, cluster_name: str) -> bool:
+        """Establish a Ray connection to the specified cluster using runtime_env from cluster config."""
+        return self.client_pool.establish_ray_connection(cluster_name)
 
     def list_registered_clusters(self):
         """List all registered clusters."""

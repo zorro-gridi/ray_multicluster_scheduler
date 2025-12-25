@@ -27,18 +27,19 @@ class WeightedPreferencePolicy:
 
             cluster_meta = self.cluster_metadata[cluster_name]
 
-            # Calculate resource availability score (0-1)
-            cpu_available = snapshot.available_resources.get("CPU", 0)
-            cpu_total = snapshot.total_resources.get("CPU", 0)
-            cpu_score = min(cpu_available / cpu_total, 1.0) if cpu_total > 0 else 0.0
+            # Calculate resource availability using absolute values
+            cpu_used_cores = snapshot.cluster_cpu_used_cores
+            cpu_total_cores = snapshot.cluster_cpu_total_cores
+            cpu_available = cpu_total_cores - cpu_used_cores
 
-            # Calculate memory availability score (0-1)
-            memory_available = snapshot.available_resources.get("memory", 0)
-            memory_total = snapshot.total_resources.get("memory", 0)
-            memory_score = min(memory_available / memory_total, 1.0) if memory_total > 0 else 0.0
+            # Calculate memory availability using absolute values
+            mem_used_mb = snapshot.cluster_mem_used_mb
+            mem_total_mb = snapshot.cluster_mem_total_mb
+            memory_available = mem_total_mb - mem_used_mb
+            memory_available_gb = memory_available / 1024.0  # Convert MB to GB
 
-            # Combine resource scores
-            resource_score = (cpu_score + memory_score) / 2.0
+            # Combine absolute resource values with weights
+            resource_score = cpu_available + memory_available_gb  # Sum of absolute available resources
 
             # Apply cluster weight
             weighted_score = resource_score * cluster_meta.weight

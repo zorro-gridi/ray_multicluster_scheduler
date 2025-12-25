@@ -5,6 +5,7 @@ Core data models for the ray multicluster scheduler.
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Any
 import uuid
+from datetime import datetime
 
 
 @dataclass
@@ -38,10 +39,19 @@ class ClusterMetadata:
 class ResourceSnapshot:
     """Snapshot of cluster resources."""
     cluster_name: str
-    available_resources: Dict[str, float]
-    total_resources: Dict[str, float]
-    node_count: int
-    timestamp: float
+    # 集群级别资源统计
+    cluster_cpu_usage_percent: float = 0.0
+    cluster_mem_usage_percent: float = 0.0
+    cluster_cpu_used_cores: float = 0.0
+    cluster_cpu_total_cores: float = 0.0
+    cluster_mem_used_mb: float = 0.0
+    cluster_mem_total_mb: float = 0.0
+    # 节点数量
+    node_count: int = 0
+    # 时间戳
+    timestamp: float = 0.0
+    # 节点级别资源统计 (按节点分组的详细信息)
+    node_stats: Optional[List[Dict]] = None  # 包含每个节点的详细统计信息，如node_id, node_ip, cpu_limit_cores等
 
 
 @dataclass
@@ -50,3 +60,21 @@ class SchedulingDecision:
     task_id: str
     cluster_name: str
     reason: str = ""
+
+
+@dataclass
+class ClusterHealth:
+    """Health status information for a cluster."""
+    score: float = 0.0
+    resources: Dict[str, Any] = field(default_factory=dict)
+    available: bool = True
+    last_checked: datetime = field(default_factory=datetime.now)
+    error_message: str = ""
+
+    def update(self, score: float, resources: Dict[str, Any], available: bool, error_message: str = ""):
+        """Update cluster health status."""
+        self.score = score
+        self.resources = resources
+        self.available = available
+        self.last_checked = datetime.now()
+        self.error_message = error_message

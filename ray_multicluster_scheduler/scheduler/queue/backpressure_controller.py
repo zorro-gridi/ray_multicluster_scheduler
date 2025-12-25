@@ -42,13 +42,15 @@ class BackpressureController:
             total_total_memory = 0
 
             for snapshot in cluster_snapshots.values():
-                # Sum up CPU resources
-                cpu_available = snapshot.available_resources.get("CPU", 0)
-                cpu_total = snapshot.total_resources.get("CPU", 0)
+                # Sum up CPU resources using new ResourceSnapshot fields
+                cpu_used = snapshot.cluster_cpu_usage_percent / 100.0 * snapshot.cluster_cpu_total_cores if snapshot.cluster_cpu_total_cores > 0 else 0
+                cpu_total = snapshot.cluster_cpu_total_cores
+                cpu_available = cpu_total - cpu_used
 
-                # Sum up memory resources (in bytes)
-                memory_available = snapshot.available_resources.get("memory", 0)
-                memory_total = snapshot.total_resources.get("memory", 0)
+                # Sum up memory resources (convert from MB to bytes for consistency)
+                memory_used = snapshot.cluster_mem_used_mb * 1024 * 1024  # Convert MB to bytes
+                memory_total = snapshot.cluster_mem_total_mb * 1024 * 1024  # Convert MB to bytes
+                memory_available = memory_total - memory_used
 
                 total_available_cpu += cpu_available
                 total_total_cpu += cpu_total

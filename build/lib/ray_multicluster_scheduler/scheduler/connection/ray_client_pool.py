@@ -1,9 +1,11 @@
 import ray
 import time
-from typing import Dict, Optional, Any
+import logging
+from typing import Dict, Optional, Any, Callable
 from ray_multicluster_scheduler.common.model import ClusterMetadata
 from ray_multicluster_scheduler.common.logging import get_logger
 from ray_multicluster_scheduler.common.exception import ClusterConnectionError
+from ray_multicluster_scheduler.control_plane.config import ConfigManager
 
 logger = get_logger(__name__)
 
@@ -11,7 +13,7 @@ logger = get_logger(__name__)
 class RayClientPool:
     """Manages a pool of Ray client connections to different clusters."""
 
-    def __init__(self):
+    def __init__(self, config_manager: ConfigManager):
         self.connections: Dict[str, Any] = {}
         self.active_connections: Dict[str, bool] = {}
         # 存储连接时间戳，用于检测连接是否过期
@@ -20,6 +22,9 @@ class RayClientPool:
         self.cluster_states: Dict[str, Dict] = {}
         # 连接超时时间（秒）
         self.connection_timeout = 300  # 5分钟
+        self.config_manager = config_manager
+        # 跟踪当前连接的集群
+        self.current_cluster = None
 
     def add_cluster(self, cluster_metadata: ClusterMetadata):
         """Add a cluster to the connection pool."""
@@ -70,6 +75,77 @@ class RayClientPool:
                 logger.warning(f"Connection to cluster {cluster_name} is invalid, will reconnect on demand")
                 return None
         return None
+
+    def establish_ray_connection(self, cluster_name: str) -> bool:
+        """Establish a Ray connection to the specified cluster using runtime_env from cluster config."""
+        if cluster_name not in self.connections:
+            logger.error(f"Cluster {cluster_name} not found in connection pool")
+            return False
+
+        try:
+            connection_info = self.connections[cluster_name]
+            ray_address = connection_info['address']
+
+            # 从集群管理器获取runtime_env
+            runtime_env = None
+            cluster_config = self.config_manager.get_cluster_config(cluster_name)
+            if cluster_config and hasattr(cluster_config, 'runtime_env'):
+                runtime_env = cluster_config.runtime_env
+
+            # 初始化Ray连接，支持从集群配置获取的runtime_env参数
+            if runtime_env:
+                ray.init(
+                    address=ray_address,
+                    runtime_env=runtime_env,
+                    ignore_reinit_error=True,
+                    logging_level=logging.WARNING
+                )
+            else:
+                ray.init(
+                    address=ray_address,
+                    ignore_reinit_error=True,
+                    logging_level=logging.WARNING
+                )
+
+            # 等待连接稳定
+            time.sleep(0.5)
+
+            if ray.is_initialized():
+                connection_info['connected'] = True
+                connection_info['last_used'] = time.time()
+                self.current_cluster = cluster_name  # 记录当前连接的集群
+                logger.info(f"Successfully connected to cluster {cluster_name}")
+                return True
+            else:
+                logger.error(f"Failed to initialize connection to cluster {cluster_name}")
+                return False
+
+        except Exception as e:
+            logger.error(f"Failed to establish connection to cluster {cluster_name}: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
+
+    def ensure_cluster_connection(self, cluster_name: str) -> bool:
+        """Ensure we are connected to the specified cluster, connecting if necessary."""
+        if cluster_name not in self.connections:
+            logger.error(f"Cluster {cluster_name} not found in connection pool")
+            return False
+
+        # 检查是否已连接到目标集群
+        if self.current_cluster == cluster_name:
+            # 已经连接到正确的集群，检查连接是否仍然有效
+            connection_info = self.connections[cluster_name]
+            if connection_info.get('connected', False):
+                # 更新最后使用时间
+                connection_info['last_used'] = time.time()
+                if cluster_name in self.cluster_states:
+                    self.cluster_states[cluster_name]['last_used'] = time.time()
+                return True
+
+        # 需要连接到指定集群
+        return self.establish_ray_connection(cluster_name)
+
 
     def release_connection(self, cluster_name: str):
         """Release a connection back to the pool."""

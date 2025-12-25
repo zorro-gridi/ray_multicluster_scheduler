@@ -20,6 +20,10 @@ from ray_multicluster_scheduler.scheduler.scheduler_core.result_collector import
 from ray_multicluster_scheduler.scheduler.scheduler_core.task_lifecycle import TaskLifecycleManager
 from ray_multicluster_scheduler.control_plane.admin_api import AdminAPI
 from ray_multicluster_scheduler.common.circuit_breaker import ClusterCircuitBreakerManager
+from ray_multicluster_scheduler.scheduler.monitor.cluster_monitor import ClusterMonitor
+from ray_multicluster_scheduler.scheduler.health.metrics_aggregator import MetricsAggregator
+from ray_multicluster_scheduler.scheduler.cluster.cluster_manager import ClusterManager
+
 
 logger = get_logger(__name__)
 
@@ -39,13 +43,13 @@ def main():
     metadata_manager = ClusterMetadataManager(cluster_configs)
 
     # 2. Health checking
-    health_checker = HealthChecker(cluster_configs)
+    client_pool = RayClientPool(config_manager)
+    health_checker = HealthChecker(cluster_configs, client_pool)
 
     # 3. Cluster registry
     cluster_registry = ClusterRegistry(metadata_manager, health_checker)
 
     # 4. Connection management
-    client_pool = RayClientPool()
     connection_manager = ConnectionLifecycleManager(client_pool)
 
     # Register clusters with connection manager
@@ -77,8 +81,15 @@ def main():
         task_queue, backpressure_controller, dispatcher, result_collector, cluster_registry, circuit_breaker_manager
     )
 
-    # 10. Admin API
-    admin_api = AdminAPI(cluster_registry, task_queue, health_checker)
+    # 10. Cluster Monitor
+    # Extract config file path or use None to let ClusterMonitor use default
+    cluster_monitor = ClusterMonitor()  # Will use default config or attempt to load from standard locations
+
+    # 11. Metrics Aggregator
+    metrics_aggregator = MetricsAggregator(health_checker, task_queue, cluster_registry, cluster_monitor)
+
+    # 12. Admin API
+    admin_api = AdminAPI(cluster_registry, task_queue, health_checker, metrics_aggregator, cluster_monitor)
 
     # Start the task lifecycle manager
     task_lifecycle_manager.start()

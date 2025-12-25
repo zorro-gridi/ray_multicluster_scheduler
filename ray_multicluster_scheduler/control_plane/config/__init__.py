@@ -2,9 +2,10 @@
 Configuration management for the ray multicluster scheduler.
 """
 
+from ast import UnaryOp
 import os
 import yaml
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Union
 from pathlib import Path
 from ray_multicluster_scheduler.common.model import ClusterMetadata
 
@@ -100,7 +101,8 @@ class ConfigManager:
                         "conda": "ts",
                         "env_vars": {
                             "home_dir": "/home/zorro"
-                        }
+                        },
+                        "working_dir": "."
                     },
                     tags=["linux", "x86_64"]
                 ),
@@ -114,7 +116,8 @@ class ConfigManager:
                         "conda": "k8s",
                         "env_vars": {
                             "home_dir": "/Users/zorro"
-                        }
+                        },
+                        "working_dir": "."
                     },
                     tags=["macos", "arm64"]
                 )
@@ -147,3 +150,8 @@ class ConfigManager:
             import traceback
             traceback.print_exc()
             raise e
+
+
+    def get_cluster_config(self, cluster_name) -> Union[ClusterMetadata, None]:
+        configs = self.get_cluster_configs()
+        return next((c for c in configs if c.name == cluster_name), None)

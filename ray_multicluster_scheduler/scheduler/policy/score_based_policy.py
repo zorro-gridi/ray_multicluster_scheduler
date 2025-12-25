@@ -24,16 +24,13 @@ class ScoreBasedPolicy:
         for cluster_name, snapshot in cluster_snapshots.items():
             # Calculate a simple score based on available CPU and memory
             # This is a basic implementation - a production system would have more sophisticated scoring
-            cpu_score = snapshot.available_resources.get("CPU", 0)
-            memory_score = snapshot.available_resources.get("memory", 0) / (1024 * 1024 * 1024)  # Convert to GB
+            # Calculate available resources from new metrics
+            cpu_available = snapshot.cluster_cpu_total_cores - snapshot.cluster_cpu_used_cores
+            memory_available_gb = (snapshot.cluster_mem_total_mb - snapshot.cluster_mem_used_mb) / 1024.0  # Convert MB to GB
 
-            # Normalize scores (0-1 range) based on typical cluster sizes
-            # These values would need to be tuned based on actual cluster sizes
-            normalized_cpu_score = min(cpu_score / 32.0, 1.0)  # Assume 32 CPUs is a large cluster
-            normalized_memory_score = min(memory_score / 128.0, 1.0)  # Assume 128GB is a large cluster
-
-            # Combine scores (simple average)
-            total_score = (normalized_cpu_score + normalized_memory_score) / 2.0
+            # Use absolute resource values for scoring instead of normalized values
+            # This approach values actual resource availability rather than relative usage
+            total_score = cpu_available + memory_available_gb  # Simple combination of absolute available resources
             scores[cluster_name] = total_score
 
         # Check if we have any clusters to evaluate

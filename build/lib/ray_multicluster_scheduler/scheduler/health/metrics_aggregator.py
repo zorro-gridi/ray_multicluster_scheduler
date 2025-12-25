@@ -9,16 +9,18 @@ from ray_multicluster_scheduler.scheduler.queue.task_queue import TaskQueue
 from ray_multicluster_scheduler.scheduler.cluster.cluster_registry import ClusterRegistry
 from ray_multicluster_scheduler.common.logging import get_logger
 
+
 logger = get_logger(__name__)
 
 
 class MetricsAggregator:
     """Aggregates metrics from various scheduler components."""
 
-    def __init__(self, health_checker: HealthChecker, task_queue: TaskQueue, cluster_registry: ClusterRegistry):
+    def __init__(self, health_checker: HealthChecker, task_queue: TaskQueue, cluster_registry: ClusterRegistry, cluster_monitor):
         self.health_checker = health_checker
         self.task_queue = task_queue
         self.cluster_registry = cluster_registry
+        self.cluster_monitor = cluster_monitor
         self.metrics = {}
         self.last_collection_time = 0
 
@@ -48,32 +50,23 @@ class MetricsAggregator:
         """Collect metrics from cluster components."""
         metrics = {}
 
-        # Get cluster snapshots
-        snapshots = self.health_checker.check_health()
+        # Get cluster snapshots from the global snapshots stored in cluster_monitor
+        cluster_info = self.cluster_monitor.get_all_cluster_info()
 
         # Collect metrics for each cluster
-        for cluster_name, snapshot in snapshots.items():
-            # CPU metrics
-            cpu_available = snapshot.available_resources.get("CPU", 0)
-            cpu_total = snapshot.total_resources.get("CPU", 0)
-            cpu_utilization = 1.0 - (cpu_available / cpu_total) if cpu_total > 0 else 0.0
+        for cluster_name, cluster_data in cluster_info.items():
+            snapshot = cluster_data['snapshot']
+            if snapshot:
+                # Use the new ResourceSnapshot fields
+                metrics[f"cluster_{cluster_name}_cpu_utilization"] = snapshot.cluster_cpu_usage_percent / 100.0  # Convert percentage to ratio
+                metrics[f"cluster_{cluster_name}_node_count"] = float(snapshot.node_count)
+                metrics[f"cluster_{cluster_name}_memory_utilization"] = snapshot.cluster_mem_usage_percent / 100.0  # Convert percentage to ratio
 
-            metrics[f"cluster_{cluster_name}_cpu_utilization"] = cpu_utilization
-            metrics[f"cluster_{cluster_name}_node_count"] = float(snapshot.node_count)
-
-            # Memory metrics (if available)
-            memory_available = snapshot.available_resources.get("memory", 0)
-            memory_total = snapshot.total_resources.get("memory", 0)
-            memory_utilization = 1.0 - (memory_available / memory_total) if memory_total > 0 else 0.0
-
-            metrics[f"cluster_{cluster_name}_memory_utilization"] = memory_utilization
-
-            # GPU metrics (if available)
-            gpu_available = snapshot.available_resources.get("GPU", 0)
-            gpu_total = snapshot.total_resources.get("GPU", 0)
-            gpu_utilization = 1.0 - (gpu_available / gpu_total) if gpu_total > 0 else 0.0
-
-            metrics[f"cluster_{cluster_name}_gpu_utilization"] = gpu_utilization
+                # Additional metrics from the new ResourceSnapshot structure
+                metrics[f"cluster_{cluster_name}_cpu_used_cores"] = snapshot.cluster_cpu_used_cores
+                metrics[f"cluster_{cluster_name}_cpu_total_cores"] = snapshot.cluster_cpu_total_cores
+                metrics[f"cluster_{cluster_name}_memory_used_mb"] = snapshot.cluster_mem_used_mb
+                metrics[f"cluster_{cluster_name}_memory_total_mb"] = snapshot.cluster_mem_total_mb
 
         return metrics
 
@@ -84,19 +77,3 @@ class MetricsAggregator:
             "task_queue_is_empty": float(self.task_queue.is_empty()),
             "task_queue_is_full": float(self.task_queue.is_full())
         }
-
-    def get_prometheus_format(self) -> str:
-        """Get metrics in Prometheus exposition format."""
-        if not self.metrics:
-            self.collect_metrics()
-
-        lines = []
-        lines.append("# HELP ray_multicluster_scheduler_metrics Ray Multi-Cluster Scheduler Metrics")
-        lines.append("# TYPE ray_multicluster_scheduler_metrics gauge")
-
-        for key, value in self.metrics.items():
-            # Replace invalid characters in metric names
-            prometheus_key = key.replace(".", "_").replace("-", "_")
-            lines.append(f"{prometheus_key} {value}")
-
-        return "\n".join(lines)

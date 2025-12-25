@@ -30,22 +30,25 @@ class EnhancedScoreBasedPolicy:
             # 获取集群配置信息
             config = cluster_metadata.get(cluster_name)
 
-            # 处理MAC集群的特殊CPU资源
-            cpu_free = snapshot.available_resources.get("CPU", 0)
-            cpu_total = snapshot.total_resources.get("CPU", 0)
+            # 使用新的资源指标
+            cpu_total_cores = snapshot.cluster_cpu_total_cores
+            cpu_used_cores = snapshot.cluster_cpu_used_cores
+            cpu_free = cpu_total_cores - cpu_used_cores
+            cpu_total = cpu_total_cores
 
-            # 对于MAC集群，检查是否有MacCPU资源
+            # 内存资源指标
+            mem_total_mb = snapshot.cluster_mem_total_mb
+            mem_used_mb = snapshot.cluster_mem_used_mb
+            mem_free_mb = mem_total_mb - mem_used_mb
+
+            # 对于MAC集群，我们没有特殊的MacCPU资源指标，使用默认值
             if config and ("mac" in cluster_name.lower() or any("mac" in tag.lower() for tag in config.tags)):
-                mac_cpu_free = snapshot.available_resources.get("MacCPU", 0)
-                mac_cpu_total = snapshot.total_resources.get("MacCPU", 0)
+                # 目前没有MacCPU指标，使用默认CPU指标
+                pass
 
-                # 如果MacCPU资源更大，则使用MacCPU资源
-                if mac_cpu_total > cpu_total:
-                    cpu_free = mac_cpu_free
-                    cpu_total = mac_cpu_total
-
-            gpu_free = snapshot.available_resources.get("GPU", 0)
-            gpu_total = snapshot.total_resources.get("GPU", 0)
+            # GPU资源暂时不可用，使用默认值
+            gpu_free = 0
+            gpu_total = 0
 
             # 如果没有集群配置信息，使用默认值
             weight = config.weight if config else 1.0
@@ -58,6 +61,10 @@ class EnhancedScoreBasedPolicy:
                 # 基础评分 = 可用CPU * 集群权重
                 base_score = cpu_free * weight
 
+                # 内存资源加成 = 可用内存(GB) * 0.1 * 集群权重
+                memory_available_gb = mem_free_mb / 1024.0  # Convert MB to GB
+                memory_bonus = memory_available_gb * 0.1 * weight
+
                 # GPU 资源加成
                 gpu_bonus = gpu_free * 5  # GPU资源更宝贵
 
@@ -69,7 +76,7 @@ class EnhancedScoreBasedPolicy:
                 load_balance_factor = 1.0 - cpu_utilization  # 负载越低因子越高
 
                 # 最终评分
-                score = (base_score + gpu_bonus) * preference_bonus * load_balance_factor
+                score = (base_score + memory_bonus + gpu_bonus) * preference_bonus * load_balance_factor
 
             scores[cluster_name] = {
                 'score': score,

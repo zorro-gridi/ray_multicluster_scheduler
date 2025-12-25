@@ -10,8 +10,7 @@ from ray_multicluster_scheduler.scheduler.connection.ray_client_pool import RayC
 from ray_multicluster_scheduler.scheduler.scheduler_core.dispatcher import Dispatcher
 from ray_multicluster_scheduler.scheduler.monitor.cluster_monitor import ClusterMonitor
 from ray_multicluster_scheduler.scheduler.queue.task_queue import TaskQueue
-# 注释掉不存在的模块
-# from ray_multicluster_scheduler.scheduler.backpressure.backpressure_controller import BackpressureController
+
 from ray_multicluster_scheduler.common.exception import NoHealthyClusterError, TaskSubmissionError
 from ray_multicluster_scheduler.common.logging import get_logger
 
@@ -25,12 +24,10 @@ class TaskLifecycleManager:
         self.cluster_monitor = cluster_monitor
         self.policy_engine = PolicyEngine()
         # 初始化client_pool和connection_manager
-        self.client_pool = RayClientPool()
+        self.client_pool = cluster_monitor.client_pool
         self.connection_manager = ConnectionLifecycleManager(self.client_pool)
-        self.dispatcher = Dispatcher(self.policy_engine, self.connection_manager)
+        self.dispatcher = Dispatcher(self.connection_manager)
         self.task_queue = TaskQueue()
-        # 注释掉不存在的模块
-        # self.backpressure_controller = BackpressureController()
         self.running = False
         self.worker_thread = None
         self._initialized = False
@@ -72,7 +69,6 @@ class TaskLifecycleManager:
                 try:
                     # 检查集群是否已经注册
                     if cluster_name not in self.connection_manager.cluster_metadata:
-                        # 将ClusterConfig转换为ClusterMetadata
                         from ray_multicluster_scheduler.common.model import ClusterMetadata
                         cluster_metadata = ClusterMetadata(
                             name=cluster_config.name,
@@ -116,22 +112,24 @@ class TaskLifecycleManager:
             # Make scheduling decision
             decision = self.policy_engine.schedule(task_desc, cluster_snapshots)
 
-            # 如果决策返回空集群名称，说明任务需要排队
-            if not decision or not decision.cluster_name:
-                logger.info(f"任务 {task_desc.task_id} 需要排队等待资源释放")
-                # 将任务加入队列
-                self.queued_tasks.append(task_desc)
-                self.task_queue.enqueue(task_desc)
+            if decision and decision.cluster_name:
+                logger.info(f"任务 {task_desc.task_id} 调度到集群 {decision.cluster_name}")
+                # 实际调度任务到选定的集群
+                future = self.dispatcher.dispatch_task(task_desc, decision.cluster_name)
+
+                # 等待任务执行完成并获取结果
+                result = ray.get(future)
+                logger.info(f"任务 {task_desc.task_id} 执行完成，结果: {result}")
                 return task_desc.task_id
-
-            logger.info(f"任务 {task_desc.task_id} 调度到集群 {decision.cluster_name}")
-            # 实际调度任务到选定的集群
-            future = self.dispatcher.dispatch_task(task_desc, cluster_snapshots)
-
-            # 等待任务执行完成并获取结果
-            result = ray.get(future)
-            logger.info(f"任务 {task_desc.task_id} 执行完成，结果: {result}")
-            return task_desc.task_id
+            else:
+                logger.info(f"任务 {task_desc.task_id} 需要排队等待资源释放")
+                # 将任务加入队列，如果是首选集群资源紧张，则加入该集群的队列
+                self.queued_tasks.append(task_desc)
+                if task_desc.preferred_cluster:
+                    self.task_queue.enqueue(task_desc, task_desc.preferred_cluster)
+                else:
+                    self.task_queue.enqueue(task_desc)
+                return task_desc.task_id
 
         except Exception as e:
             logger.error(f"任务 {task_desc.task_id} 提交失败: {e}")
@@ -139,7 +137,10 @@ class TaskLifecycleManager:
             traceback.print_exc()
             # Even on error, we can try to queue the task for later retry
             self.queued_tasks.append(task_desc)  # Track queued tasks
-            self.task_queue.enqueue(task_desc)
+            if task_desc.preferred_cluster:
+                self.task_queue.enqueue(task_desc, task_desc.preferred_cluster)
+            else:
+                self.task_queue.enqueue(task_desc)
             return task_desc.task_id
 
     def submit_task_and_get_future(self, task_desc: TaskDescription) -> Optional[Any]:
@@ -161,18 +162,20 @@ class TaskLifecycleManager:
             # Make scheduling decision
             decision = self.policy_engine.schedule(task_desc, cluster_snapshots)
 
-            # 如果决策返回空集群名称，说明任务需要排队
-            if not decision or not decision.cluster_name:
+            if decision and decision.cluster_name:
+                logger.info(f"任务 {task_desc.task_id} 调度到集群 {decision.cluster_name}")
+                # 实际调度任务到选定的集群并返回future
+                future = self.dispatcher.dispatch_task(task_desc, decision.cluster_name)
+                return future
+            else:
                 logger.info(f"任务 {task_desc.task_id} 需要排队等待资源释放")
-                # 将任务加入队列
+                # 将任务加入队列，如果是首选集群资源紧张，则加入该集群的队列
                 self.queued_tasks.append(task_desc)
-                self.task_queue.enqueue(task_desc)
+                if task_desc.preferred_cluster:
+                    self.task_queue.enqueue(task_desc, task_desc.preferred_cluster)
+                else:
+                    self.task_queue.enqueue(task_desc)
                 return None
-
-            logger.info(f"任务 {task_desc.task_id} 调度到集群 {decision.cluster_name}")
-            # 实际调度任务到选定的集群并返回future
-            future = self.dispatcher.dispatch_task(task_desc, cluster_snapshots)
-            return future
 
         except Exception as e:
             logger.error(f"任务 {task_desc.task_id} 提交失败: {e}")
@@ -180,7 +183,10 @@ class TaskLifecycleManager:
             traceback.print_exc()
             # 将任务加入队列以便稍后重试
             self.queued_tasks.append(task_desc)
-            self.task_queue.enqueue(task_desc)
+            if task_desc.preferred_cluster:
+                self.task_queue.enqueue(task_desc, task_desc.preferred_cluster)
+            else:
+                self.task_queue.enqueue(task_desc)
             return None
 
     def _worker_loop(self):
@@ -193,9 +199,6 @@ class TaskLifecycleManager:
                 if not self._initialized:
                     self._initialize_connections()
 
-                # Refresh cluster resource snapshots periodically
-                self.cluster_monitor.refresh_resource_snapshots()
-
                 # Get cluster snapshots
                 cluster_info = self.cluster_monitor.get_all_cluster_info()
                 cluster_snapshots = {name: info['snapshot'] for name, info in cluster_info.items()
@@ -207,26 +210,34 @@ class TaskLifecycleManager:
                     self._re_evaluate_queued_tasks(cluster_snapshots, cluster_info)
                     last_re_evaluation = current_time
 
-                # Check if backpressure should still be applied
-                # 注释掉不存在的模块调用
-                # if self.backpressure_controller.should_apply_backpressure(cluster_snapshots):
-                if False:  # 暂时禁用背压控制
-                    # Apply backpressure by sleeping
-                    # backoff_time = self.backpressure_controller.get_backoff_time()
-                    backoff_time = 1.0  # 默认休眠时间
-                    logger.info(f"应用背压控制，休眠 {backoff_time} 秒")
-                    time.sleep(backoff_time)
-                    continue
+                # Try to get a task from cluster-specific queues first, then from global queue
+                task_desc = None
+                source_cluster = None
 
-                # Dequeue a task
-                task_desc = self.task_queue.dequeue()
+                # Check if there are any cluster-specific queues with tasks
+                cluster_queue_names = self.task_queue.get_cluster_queue_names()
+
+                if cluster_queue_names:
+                    # Try to get tasks from cluster queues first
+                    for cluster_name in cluster_queue_names:
+                        # Try to get a task from this specific cluster queue
+                        task_desc = self.task_queue.dequeue_from_cluster(cluster_name)
+                        if task_desc:
+                            source_cluster = cluster_name
+                            break
+
+                # If no task from cluster queues, try global queue
                 if not task_desc:
-                    # No tasks in queue, sleep briefly
+                    task_desc = self.task_queue.dequeue()
+                    # source_cluster remains None for global queue tasks
+
+                if not task_desc:
+                    # No tasks in any queue, sleep briefly
                     time.sleep(0.1)
                     continue
 
-                # Process the task
-                self._process_task(task_desc, cluster_snapshots)
+                # Process the task, passing the source cluster information
+                self._process_task(task_desc, cluster_snapshots, source_cluster)
 
             except Exception as e:
                 logger.error(f"任务生命周期工作者循环错误: {e}")
@@ -266,14 +277,22 @@ class TaskLifecycleManager:
                         if decision and decision.cluster_name:
                             # Found a suitable cluster, process this task immediately
                             logger.info(f"任务 {task_desc.task_id} 重新调度到集群 {decision.cluster_name}")
-                            self._process_task(task_desc, cluster_snapshots)
+                            # 重新评估的任务来自全局排队列表，没有特定的源集群
+                            self._process_task(task_desc, cluster_snapshots, None)
                             rescheduled_count += 1
                         else:
                             # Still no suitable cluster, keep in queue
                             remaining_tasks.append(task_desc)
                     except Exception as e:
                         logger.error(f"重新评估任务 {task_desc.task_id} 时出错: {e}")
-                        # Keep task in queue on error
+                        # 如果是首选集群不可用的异常，直接记录错误并重新加入队列
+                        if "不在线或无法连接" in str(e):
+                            logger.error(f"首选集群不可用，任务 {task_desc.task_id} 重新加入队列: {e}")
+                        # Keep task in queue on error - add back to appropriate queue
+                        if task_desc.preferred_cluster:
+                            self.task_queue.enqueue(task_desc, task_desc.preferred_cluster)
+                        else:
+                            self.task_queue.enqueue(task_desc)
                         remaining_tasks.append(task_desc)
 
                 # Update tracked queued tasks
@@ -287,8 +306,14 @@ class TaskLifecycleManager:
             import traceback
             traceback.print_exc()
 
-    def _process_task(self, task_desc: TaskDescription, cluster_snapshots: Dict[str, ResourceSnapshot]):
-        """Process a single task."""
+    def _process_task(self, task_desc: TaskDescription, cluster_snapshots: Dict[str, ResourceSnapshot], source_cluster_queue: str = None):
+        """Process a single task.
+
+        Args:
+            task_desc: The task to process
+            cluster_snapshots: Current cluster resource snapshots
+            source_cluster_queue: Name of the cluster queue this task came from, if any
+        """
         try:
             # Ensure connections are initialized
             if not self._initialized:
@@ -301,24 +326,72 @@ class TaskLifecycleManager:
             cluster_metadata = {name: info['metadata'] for name, info in cluster_info.items()}
             self.policy_engine.update_cluster_metadata(cluster_metadata)
 
-            # Make scheduling decision
+            # 如果任务来自特定集群队列，直接调度到该集群（符合规则1：指定集群任务排队队列中的task只能进入指定集群执行）
+            if source_cluster_queue:
+                logger.info(f"任务 {task_desc.task_id} 来自集群 {source_cluster_queue} 的队列，直接调度到该集群")
+                # 检查目标集群是否健康可用
+                if source_cluster_queue not in cluster_snapshots:
+                    logger.error(f"目标集群 {source_cluster_queue} 不在线或无法连接，任务 {task_desc.task_id} 重新加入队列")
+                    self.queued_tasks.append(task_desc)  # Track queued tasks
+                    if task_desc.preferred_cluster:
+                        self.task_queue.enqueue(task_desc, task_desc.preferred_cluster)
+                    else:
+                        self.task_queue.enqueue(task_desc)
+                    return
+
+                # 检查目标集群资源是否仍然紧张
+                snapshot = cluster_snapshots[source_cluster_queue]
+                # 使用新的资源指标
+                cpu_used_cores = snapshot.cluster_cpu_used_cores
+                cpu_total_cores = snapshot.cluster_cpu_total_cores
+                # 估算可用CPU资源
+                cpu_available = cpu_total_cores - cpu_used_cores
+                cpu_total = cpu_total_cores
+
+                # 假设没有GPU指标，使用默认值
+                gpu_available = 0
+                gpu_total = 0
+
+                cpu_utilization = cpu_used_cores / cpu_total_cores if cpu_total_cores > 0 else 0
+                gpu_utilization = 0  # GPU指标暂不可用
+
+                # 检查内存使用率
+                mem_utilization = snapshot.cluster_mem_usage_percent / 100.0 if snapshot.cluster_mem_total_mb > 0 else 0
+
+                # 检查资源使用率是否仍超过阈值
+                if cpu_utilization > self.policy_engine.RESOURCE_THRESHOLD or gpu_utilization > self.policy_engine.RESOURCE_THRESHOLD or mem_utilization > self.policy_engine.RESOURCE_THRESHOLD:
+                    logger.warning(f"目标集群 {source_cluster_queue} 资源使用率仍然超过阈值，任务 {task_desc.task_id} 重新进入该集群队列等待")
+                    # 重新加入该集群的队列等待
+                    self.task_queue.enqueue(task_desc, source_cluster_queue)
+                    self.queued_tasks.append(task_desc)  # Track queued tasks
+                    return
+
+                # 直接调度到指定集群
+                future = self.dispatcher.dispatch_task(task_desc, source_cluster_queue)
+                result = ray.get(future)
+                logger.info(f"任务 {task_desc.task_id} 在集群 {source_cluster_queue} 执行完成，结果: {result}")
+                return
+
+            # 如果任务来自全局队列，按照规则2：需要经过policy调度策略评估，决策目标调度集群
             decision = self.policy_engine.schedule(task_desc, cluster_snapshots)
 
-            # 如果决策返回空集群名称，说明任务仍需要排队
-            if not decision or not decision.cluster_name:
+            if decision and decision.cluster_name:
+                logger.info(f"任务 {task_desc.task_id} 调度到集群 {decision.cluster_name}")
+                # 实际调度任务到选定的集群
+                future = self.dispatcher.dispatch_task(task_desc, decision.cluster_name)
+
+                # 等待任务执行完成并获取结果
+                result = ray.get(future)
+                logger.info(f"任务 {task_desc.task_id} 执行完成，结果: {result}")
+            else:
                 # If no cluster is available, re-enqueue the task
                 logger.warning(f"没有可用集群处理任务 {task_desc.task_id}，重新加入队列")
                 self.queued_tasks.append(task_desc)  # Track queued tasks
-                self.task_queue.enqueue(task_desc)
+                if task_desc.preferred_cluster:
+                    self.task_queue.enqueue(task_desc, task_desc.preferred_cluster)
+                else:
+                    self.task_queue.enqueue(task_desc)
                 return
-
-            logger.info(f"任务 {task_desc.task_id} 调度到集群 {decision.cluster_name}")
-            # 实际调度任务到选定的集群
-            future = self.dispatcher.dispatch_task(task_desc, cluster_snapshots)
-
-            # 等待任务执行完成并获取结果
-            result = ray.get(future)
-            logger.info(f"任务 {task_desc.task_id} 执行完成，结果: {result}")
 
         except NoHealthyClusterError as e:
             logger.error(f"任务 {task_desc.task_id} 失败，无健康集群: {e}")
@@ -326,18 +399,27 @@ class TaskLifecycleManager:
             traceback.print_exc()
             # Re-enqueue the task for later retry
             self.queued_tasks.append(task_desc)  # Track queued tasks
-            self.task_queue.enqueue(task_desc)
+            if task_desc.preferred_cluster:
+                self.task_queue.enqueue(task_desc, task_desc.preferred_cluster)
+            else:
+                self.task_queue.enqueue(task_desc)
         except TaskSubmissionError as e:
             logger.error(f"任务 {task_desc.task_id} 提交失败: {e}")
             import traceback
             traceback.print_exc()
             # Re-enqueue the task for later retry
             self.queued_tasks.append(task_desc)  # Track queued tasks
-            self.task_queue.enqueue(task_desc)
+            if task_desc.preferred_cluster:
+                self.task_queue.enqueue(task_desc, task_desc.preferred_cluster)
+            else:
+                self.task_queue.enqueue(task_desc)
         except Exception as e:
             logger.error(f"任务 {task_desc.task_id} 意外失败: {e}")
             import traceback
             traceback.print_exc()
             # Re-enqueue the task for later retry
             self.queued_tasks.append(task_desc)  # Track queued tasks
-            self.task_queue.enqueue(task_desc)
+            if task_desc.preferred_cluster:
+                self.task_queue.enqueue(task_desc, task_desc.preferred_cluster)
+            else:
+                self.task_queue.enqueue(task_desc)

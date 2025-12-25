@@ -59,23 +59,31 @@ class PolicyEngine:
             if task_desc.preferred_cluster in cluster_snapshots:
                 # 获取首选集群的资源信息
                 snapshot = cluster_snapshots[task_desc.preferred_cluster]
-                cpu_available = snapshot.available_resources.get("CPU", 0)
-                cpu_total = snapshot.total_resources.get("CPU", 0)
-                gpu_available = snapshot.available_resources.get("GPU", 0)
-                gpu_total = snapshot.total_resources.get("GPU", 0)
+                # 使用新的资源指标
+                cpu_used_cores = snapshot.cluster_cpu_used_cores
+                cpu_total_cores = snapshot.cluster_cpu_total_cores
+                cpu_available = cpu_total_cores - cpu_used_cores
+                cpu_total = cpu_total_cores
+
+                # GPU资源暂时不可用，使用默认值
+                gpu_available = 0
+                gpu_total = 0
 
                 # 检查资源使用率是否超过阈值
-                cpu_utilization = (cpu_total - cpu_available) / cpu_total if cpu_total > 0 else 0
-                gpu_utilization = (gpu_total - gpu_available) / gpu_total if gpu_total > 0 else 0
+                cpu_utilization = cpu_used_cores / cpu_total_cores if cpu_total_cores > 0 else 0
+                gpu_utilization = 0  # GPU指标暂不可用
 
-                if cpu_utilization > self.RESOURCE_THRESHOLD or gpu_utilization > self.RESOURCE_THRESHOLD:
+                # 检查内存使用率
+                mem_utilization = snapshot.cluster_mem_usage_percent / 100.0 if snapshot.cluster_mem_total_mb > 0 else 0
+
+                if cpu_utilization > self.RESOURCE_THRESHOLD or gpu_utilization > self.RESOURCE_THRESHOLD or mem_utilization > self.RESOURCE_THRESHOLD:
                     logger.warning(f"用户指定的首选集群 {task_desc.preferred_cluster} 资源使用率超过阈值 "
-                                 f"(CPU: {cpu_utilization:.2f}, GPU: {gpu_utilization:.2f})，任务将进入队列等待")
-                    # 返回空决策，表示任务需要排队
+                                 f"(CPU: {cpu_utilization:.2f}, GPU: {gpu_utilization:.2f}, 内存: {mem_utilization:.2f})，任务将进入该集群的待执行队列等待")
+                    # 返回首选集群名称，让任务进入该集群的队列等待
                     return SchedulingDecision(
                         task_id=task_desc.task_id,
-                        cluster_name="",
-                        reason=f"首选集群 {task_desc.preferred_cluster} 资源使用率超过阈值，任务进入队列等待"
+                        cluster_name=task_desc.preferred_cluster,
+                        reason=f"首选集群 {task_desc.preferred_cluster} 资源紧张，任务进入该集群的待执行队列等待"
                     )
                 else:
                     logger.info(f"任务 {task_desc.task_id} 将调度到用户指定的首选集群 [{task_desc.preferred_cluster}]: "
@@ -88,7 +96,9 @@ class PolicyEngine:
                                f"可用资源: CPU={cpu_available}, GPU={gpu_available}"
                     )
             else:
-                logger.warning(f"用户指定的首选集群 {task_desc.preferred_cluster} 不可用，回退到负载均衡调度")
+                logger.error(f"用户指定的首选集群 {task_desc.preferred_cluster} 不在线或无法连接")
+                # 首选集群完全不可用，直接抛出异常
+                raise PolicyEvaluationError(f"用户指定的首选集群 {task_desc.preferred_cluster} 不在线或无法连接")
         else:
             logger.info(f"未指定首选集群，使用负载均衡策略选择最优集群")
 
@@ -98,16 +108,24 @@ class PolicyEngine:
         available_clusters = []
 
         for cluster_name, snapshot in cluster_snapshots.items():
-            cpu_available = snapshot.available_resources.get("CPU", 0)
-            cpu_total = snapshot.total_resources.get("CPU", 0)
-            gpu_available = snapshot.available_resources.get("GPU", 0)
-            gpu_total = snapshot.total_resources.get("GPU", 0)
+            # 使用新的资源指标
+            cpu_used_cores = snapshot.cluster_cpu_used_cores
+            cpu_total_cores = snapshot.cluster_cpu_total_cores
+            cpu_available = cpu_total_cores - cpu_used_cores
+            cpu_total = cpu_total_cores
+
+            # GPU资源暂时不可用，使用默认值
+            gpu_available = 0
+            gpu_total = 0
 
             # 检查资源使用率是否超过阈值
-            cpu_utilization = (cpu_total - cpu_available) / cpu_total if cpu_total > 0 else 0
-            gpu_utilization = (gpu_total - gpu_available) / gpu_total if gpu_total > 0 else 0
+            cpu_utilization = cpu_used_cores / cpu_total_cores if cpu_total_cores > 0 else 0
+            gpu_utilization = 0  # GPU指标暂不可用
 
-            if cpu_utilization <= self.RESOURCE_THRESHOLD and gpu_utilization <= self.RESOURCE_THRESHOLD:
+            # 检查内存使用率
+            mem_utilization = snapshot.cluster_mem_usage_percent / 100.0 if snapshot.cluster_mem_total_mb > 0 else 0
+
+            if cpu_utilization <= self.RESOURCE_THRESHOLD and gpu_utilization <= self.RESOURCE_THRESHOLD and mem_utilization <= self.RESOURCE_THRESHOLD:
                 all_clusters_over_threshold = False
                 available_clusters.append(cluster_name)
 
@@ -119,6 +137,23 @@ class PolicyEngine:
                 cluster_name="",
                 reason="所有集群资源使用率都超过阈值，任务进入队列等待"
             )
+
+        # Rule 3: 如果没有指定首选集群，且存在资源使用率超过阈值的集群，则执行负载均衡策略
+        if not task_desc.preferred_cluster:
+            # 检查是否有任何集群的资源使用率超过阈值
+            for cluster_name, snapshot in cluster_snapshots.items():
+                # 检查CPU、GPU和内存使用率
+                cpu_utilization = snapshot.cluster_cpu_used_cores / snapshot.cluster_cpu_total_cores if snapshot.cluster_cpu_total_cores > 0 else 0
+                gpu_utilization = 0  # GPU指标暂不可用
+                mem_utilization = snapshot.cluster_mem_usage_percent / 100.0 if snapshot.cluster_mem_total_mb > 0 else 0
+
+                if cpu_utilization > self.RESOURCE_THRESHOLD or gpu_utilization > self.RESOURCE_THRESHOLD or mem_utilization > self.RESOURCE_THRESHOLD:
+                    logger.info(f"检测到集群 {cluster_name} 资源使用率超过阈值，触发负载均衡策略")
+                    logger.info(f"  - CPU使用率: {cpu_utilization:.2f} (阈值: {self.RESOURCE_THRESHOLD})")
+                    logger.info(f"  - 内存使用率: {mem_utilization:.2f} (阈值: {self.RESOURCE_THRESHOLD})")
+                    break  # 找到一个超阈值的集群就足够触发负载均衡
+        else:
+            logger.info(f"任务指定了首选集群 {task_desc.preferred_cluster}，不应用负载均衡策略")
 
         # Collect decisions from all policies
         policy_decisions = []
@@ -139,7 +174,7 @@ class PolicyEngine:
 
         # Combine decisions - in this simple implementation, we prioritize tag affinity
         # if it provides a specific cluster, otherwise fall back to score-based policy
-        final_decision = self._combine_decisions(task_desc, policy_decisions, cluster_snapshots)
+        final_decision = self._combine_decisions(task_desc, policy_decisions)
 
         if not final_decision or not final_decision.cluster_name:
             # Rule 3: If no specific cluster was recommended by policies, use cluster monitor to select best cluster
@@ -158,8 +193,9 @@ class PolicyEngine:
                         cluster_data = cluster_info.get(best_cluster)
                         if cluster_data and cluster_data['snapshot']:
                             snapshot = cluster_data['snapshot']
-                            cpu_available = snapshot.available_resources.get("CPU", 0)
-                            gpu_available = snapshot.available_resources.get("GPU", 0)
+                            # 使用新的资源指标
+                            cpu_available = snapshot.cluster_cpu_total_cores - snapshot.cluster_cpu_used_cores
+                            gpu_available = 0  # GPU指标暂不可用
 
                             logger.info(f"任务 {task_desc.task_id} 通过负载均衡算法调度到最佳集群 [{best_cluster}]: "
                                        f"可用资源 - CPU: {cpu_available}, GPU: {gpu_available}")
@@ -192,8 +228,9 @@ class PolicyEngine:
         logger.info(f"最终调度决策: {final_decision}")
         return final_decision
 
-    def _combine_decisions(self, task_desc: TaskDescription, policy_decisions: List[SchedulingDecision],
-                          cluster_snapshots: Dict[str, ResourceSnapshot]) -> SchedulingDecision:
+    def _combine_decisions(
+        self, task_desc: TaskDescription, policy_decisions: List[SchedulingDecision],
+                        ) -> SchedulingDecision:
         """Combine decisions from multiple policies."""
         # First, check if tag affinity policy provided a specific cluster
         for decision in policy_decisions:

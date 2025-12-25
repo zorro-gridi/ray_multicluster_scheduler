@@ -62,9 +62,6 @@ class TaskLifecycleManager:
         """Submit a task to the queue."""
         # 直接处理任务而不是仅仅加入队列
         try:
-            # Refresh cluster resource snapshots
-            self.cluster_registry.refresh_resource_snapshots()
-
             # Get cluster snapshots
             cluster_info = self.cluster_registry.get_all_cluster_info()
             cluster_snapshots = {name: info['snapshot'] for name, info in cluster_info.items()
@@ -81,9 +78,6 @@ class TaskLifecycleManager:
         """Main worker loop that processes tasks from the queue."""
         while self.running:
             try:
-                # Refresh cluster resource snapshots
-                self.cluster_registry.refresh_resource_snapshots()
-
                 # Check if backpressure should be applied
                 cluster_info = self.cluster_registry.get_all_cluster_info()
                 cluster_snapshots = {name: info['snapshot'] for name, info in cluster_info.items()
@@ -103,20 +97,41 @@ class TaskLifecycleManager:
                     time.sleep(0.1)
                     continue
 
-                # Process the task
-                self._process_task(task_desc, cluster_snapshots)
+                # Process the task - need to determine the target cluster for the task
+                # For now, we'll implement the same logic as in submit_task to determine target cluster
+                cluster_info = self.cluster_registry.get_all_cluster_info()
+                cluster_snapshots = {name: info['snapshot'] for name, info in cluster_info.items()
+                                  if info['snapshot'] is not None}
+
+                # We need to determine the target cluster for the task
+                # For now, let's assume we get the target cluster from a policy engine
+                # In a real implementation, this would come from the scheduling decision
+                from ray_multicluster_scheduler.scheduler.policy.policy_engine import PolicyEngine
+                policy_engine = PolicyEngine()
+                cluster_metadata = {name: info['metadata'] for name, info in cluster_info.items()}
+                policy_engine.update_cluster_metadata(cluster_metadata)
+
+                # Make scheduling decision
+                decision = policy_engine.schedule(task_desc, cluster_snapshots)
+                target_cluster = decision.cluster_name if decision else None
+
+                if target_cluster:
+                    self._process_task(task_desc, target_cluster)
+                else:
+                    logger.warning(f"Could not determine target cluster for task {task_desc.task_id}, skipping")
+                    continue
 
             except Exception as e:
                 logger.error(f"Error in task lifecycle worker loop: {e}")
                 time.sleep(1.0)  # Sleep to avoid tight loop on repeated errors
 
-    def _process_task(self, task_desc: TaskDescription, cluster_snapshots: Dict[str, ResourceSnapshot]):
+    def _process_task(self, task_desc: TaskDescription, target_cluster: str):
         """Process a single task."""
         try:
             logger.info(f"Processing task {task_desc.task_id}")
 
             # Dispatch the task
-            future = self.dispatcher.dispatch_task(task_desc, cluster_snapshots)
+            future = self.dispatcher.dispatch_task(task_desc, target_cluster)
 
             # Collect the result
             # Note: In a real implementation, you might want to handle this asynchronously

@@ -19,14 +19,6 @@ class ClusterRegistry:
         self.health_checker = health_checker
         self.resource_snapshots: Dict[str, ResourceSnapshot] = {}
 
-    def refresh_resource_snapshots(self):
-        """Refresh resource snapshots from health checker."""
-        try:
-            self.resource_snapshots = self.health_checker.check_health()
-            logger.debug(f"Refreshed resource snapshots for {len(self.resource_snapshots)} clusters")
-        except Exception as e:
-            logger.error(f"Failed to refresh resource snapshots: {e}")
-
     def get_cluster_metadata(self, name: str) -> Optional[ClusterMetadata]:
         """Get cluster metadata by name."""
         return self.metadata_manager.get_cluster(name)

@@ -14,12 +14,14 @@ from ray_multicluster_scheduler.scheduler.connection.ray_client_pool import RayC
 from ray_multicluster_scheduler.scheduler.connection.connection_lifecycle import ConnectionLifecycleManager
 from ray_multicluster_scheduler.scheduler.policy.policy_engine import PolicyEngine
 from ray_multicluster_scheduler.scheduler.queue.task_queue import TaskQueue
-from ray_multicluster_scheduler.scheduler.queue.backpressure_controller import BackpressureController
 from ray_multicluster_scheduler.scheduler.scheduler_core.dispatcher import Dispatcher
-from ray_multicluster_scheduler.scheduler.scheduler_core.result_collector import ResultCollector
-from ray_multicluster_scheduler.scheduler.scheduler_core.task_lifecycle import TaskLifecycleManager
+from ray_multicluster_scheduler.scheduler.lifecycle.task_lifecycle_manager import TaskLifecycleManager
 from ray_multicluster_scheduler.control_plane.admin_api import AdminAPI
 from ray_multicluster_scheduler.common.circuit_breaker import ClusterCircuitBreakerManager
+from ray_multicluster_scheduler.scheduler.monitor.cluster_monitor import ClusterMonitor
+from ray_multicluster_scheduler.scheduler.health.metrics_aggregator import MetricsAggregator
+from ray_multicluster_scheduler.scheduler.cluster.cluster_manager import ClusterManager
+
 
 logger = get_logger(__name__)
 
@@ -39,14 +41,14 @@ def main():
     metadata_manager = ClusterMetadataManager(cluster_configs)
 
     # 2. Health checking
-    health_checker = HealthChecker(cluster_configs)
+    client_pool = RayClientPool(config_manager)
+    health_checker = HealthChecker(cluster_configs, client_pool)
 
     # 3. Cluster registry
     cluster_registry = ClusterRegistry(metadata_manager, health_checker)
 
     # 4. Connection management
-    client_pool = RayClientPool()
-    connection_manager = ConnectionLifecycleManager(client_pool)
+    connection_manager = ConnectionLifecycleManager(client_pool, cluster_registry)
 
     # Register clusters with connection manager
     for cluster_config in cluster_configs:
@@ -59,26 +61,24 @@ def main():
     cluster_metadata_dict = {cluster.name: cluster for cluster in cluster_configs}
     policy_engine = PolicyEngine(cluster_metadata_dict)
 
-    # 6. Task queue
-    task_queue = TaskQueue(max_size=config_manager.get("task_queue_max_size", 1000))
-
-    # 7. Backpressure controller
-    backpressure_controller = BackpressureController(threshold=0.8)
-
-    # 8. Circuit breaker manager
+    # 6. Dispatcher
     circuit_breaker_manager = ClusterCircuitBreakerManager()
+    dispatcher = Dispatcher(connection_manager, circuit_breaker_manager)
 
-    # 9. Dispatcher and result collector
-    dispatcher = Dispatcher(policy_engine, connection_manager, circuit_breaker_manager)
-    result_collector = ResultCollector()
+    # 10. Cluster Monitor
+    # Extract config file path or use None to let ClusterMonitor use default
+    cluster_monitor = ClusterMonitor()  # Will use default config or attempt to load from standard locations
 
     # 10. Task lifecycle manager
     task_lifecycle_manager = TaskLifecycleManager(
-        task_queue, backpressure_controller, dispatcher, result_collector, cluster_registry, circuit_breaker_manager
+        cluster_monitor=cluster_monitor
     )
 
-    # 10. Admin API
-    admin_api = AdminAPI(cluster_registry, task_queue, health_checker)
+    # 11. Metrics Aggregator
+    metrics_aggregator = MetricsAggregator(health_checker, task_lifecycle_manager.task_queue, cluster_registry, cluster_monitor)
+
+    # 12. Admin API
+    admin_api = AdminAPI(cluster_registry, task_lifecycle_manager.task_queue, health_checker, metrics_aggregator, cluster_monitor)
 
     # Start the task lifecycle manager
     task_lifecycle_manager.start()

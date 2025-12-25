@@ -7,10 +7,12 @@ and submitting tasks/actors to the multicluster scheduler.
 
 import logging
 import time
+import threading
 from typing import Callable, Dict, List, Any, Optional, Type
 from ray_multicluster_scheduler.scheduler.lifecycle.task_lifecycle_manager import TaskLifecycleManager
-from ray_multicluster_scheduler.control_plane.config import ConfigManager
 from ray_multicluster_scheduler.scheduler.monitor.cluster_monitor import ClusterMonitor
+from ray_multicluster_scheduler.scheduler.health.health_checker import HealthChecker
+from ray_multicluster_scheduler.common.model import ClusterMetadata
 
 # Configure logging with default INFO level if not already configured
 try:
@@ -39,6 +41,10 @@ class UnifiedScheduler:
     # Store the config file path used for initialization
     _config_file_path = None
 
+    # Health checker background thread
+    _health_checker_thread = None
+    _health_checker_stop_event = None
+
     def __new__(cls):
         if cls._instance is None:
             cls._instance = super(UnifiedScheduler, cls).__new__(cls)
@@ -48,6 +54,8 @@ class UnifiedScheduler:
         """Initialize the unified scheduler."""
         if not self._initialized:
             self.task_lifecycle_manager = None
+            self._health_checker_stop_event = threading.Event()
+            self._health_checker_thread = None
             self._initialized = True
 
     def initialize_environment(self, config_file_path: Optional[str] = None) -> TaskLifecycleManager:
@@ -89,6 +97,9 @@ class UnifiedScheduler:
             # Display cluster information and resource usage
             self._display_cluster_info(cluster_monitor)
 
+            # Start the background health checker thread
+            self._start_health_checker_thread(cluster_monitor)
+
             logger.info("🚀 调度器环境初始化成功完成")
             return self.task_lifecycle_manager
         except Exception as e:
@@ -98,12 +109,88 @@ class UnifiedScheduler:
             logger.error(f"Traceback:\n{traceback_str}")
             raise Exception(f"Failed to initialize scheduler environment: {e}\nFull traceback:\n{traceback_str}")
 
+    def _start_health_checker_thread(self, cluster_monitor):
+        """Start the background health checker thread."""
+        # Stop any existing health checker thread
+        self._stop_health_checker_thread()
+
+        # Reset the stop event
+        self._health_checker_stop_event.clear()
+
+        # Create and start the health checker thread
+        self._health_checker_thread = threading.Thread(
+            target=self._run_health_checker,
+            args=(cluster_monitor,),
+            daemon=True  # Make thread a daemon so it doesn't prevent program exit
+        )
+        self._health_checker_thread.start()
+        logger.info("Health checker background thread started")
+
+    def _run_health_checker(self, cluster_monitor):
+        """Run the health checker in a background thread."""
+        logger.info("Health checker started, updating cluster snapshots every 20 seconds")
+
+        while not self._health_checker_stop_event.is_set():
+            try:
+                # Get cluster metadata from the cluster monitor
+                cluster_metadata_list = []
+                cluster_info = cluster_monitor.get_all_cluster_info()
+                for name, info in cluster_info.items():
+                    metadata = info['metadata']
+                    cluster_metadata = ClusterMetadata(
+                        name=metadata.name,
+                        head_address=metadata.head_address,
+                        dashboard=metadata.dashboard,
+                        prefer=metadata.prefer,
+                        weight=metadata.weight,
+                        runtime_env=metadata.runtime_env,
+                        tags=metadata.tags
+                    )
+                    cluster_metadata_list.append(cluster_metadata)
+
+                # Create HealthChecker and update snapshots
+                if cluster_metadata_list:  # Only create HealthChecker if there are clusters
+                    # Use the cluster monitor's client pool for health checking
+                    health_checker = HealthChecker(cluster_metadata_list, cluster_monitor.client_pool)
+
+                    # Update cluster manager's health status with current health check results
+                    health_checker.update_cluster_manager_health(cluster_monitor.cluster_manager)
+
+                    # Also update cluster monitor snapshots
+                    snapshots = health_checker.check_health()
+
+                    # Update cluster monitor with new snapshots
+                    for cluster_name, snapshot in snapshots.items():
+                        cluster_monitor.update_resource_snapshot(cluster_name, snapshot)
+
+                    logger.debug(f"Updated health snapshots for {len(snapshots)} clusters")
+
+                # Wait for 20 seconds or until stop event is set
+                for _ in range(20):  # 20 seconds with 1-second intervals
+                    if self._health_checker_stop_event.is_set():
+                        break
+                    time.sleep(1)
+            except Exception as e:
+                logger.error(f"Error in health checker: {e}")
+                # Wait for 10 seconds before retrying to avoid rapid error loops
+                for _ in range(10):
+                    if self._health_checker_stop_event.is_set():
+                        break
+                    time.sleep(1)
+
+        logger.info("Health checker stopped")
+
+    def _stop_health_checker_thread(self):
+        """Stop the background health checker thread."""
+        if self._health_checker_thread and self._health_checker_thread.is_alive():
+            logger.info("Stopping health checker background thread...")
+            self._health_checker_stop_event.set()
+            self._health_checker_thread.join(timeout=5)  # Wait up to 5 seconds for thread to finish
+            logger.info("Health checker background thread stopped")
+
     def _display_cluster_info(self, cluster_monitor):
         """Display cluster information and resource usage."""
         try:
-            # Refresh cluster resource snapshots to ensure we have current information
-            cluster_monitor.refresh_resource_snapshots(force=True)
-
             # Get cluster information
             cluster_info = cluster_monitor.get_all_cluster_info()
 
@@ -120,34 +207,40 @@ class UnifiedScheduler:
                 metadata = info['metadata']
                 snapshot = info['snapshot']
 
-                if snapshot and snapshot.available_resources:
-                    # Get resource information
-                    cpu_free = snapshot.available_resources.get("CPU", 0)
-                    cpu_total = snapshot.total_resources.get("CPU", 0)
-                    gpu_free = snapshot.available_resources.get("GPU", 0)
-                    gpu_total = snapshot.total_resources.get("GPU", 0)
-                    memory_free = snapshot.available_resources.get("memory", 0)
-                    memory_total = snapshot.total_resources.get("memory", 0)
+                if snapshot:
+                    # Get resource information from new ResourceSnapshot fields
+                    cpu_free = snapshot.cluster_cpu_total_cores - round(snapshot.cluster_cpu_usage_percent / 100.0 * snapshot.cluster_cpu_total_cores, 1) if snapshot.cluster_cpu_total_cores > 0 else 0
+                    cpu_total = snapshot.cluster_cpu_total_cores
+                    # Note: GPU information is not available in the new ResourceSnapshot structure
+                    gpu_free = 0  # Placeholder since GPU info is not in new structure
+                    gpu_total = 0  # Placeholder since GPU info is not in new structure
+                    memory_free_gb = (snapshot.cluster_mem_total_mb - snapshot.cluster_mem_used_mb) / 1024.0 if snapshot.cluster_mem_total_mb > 0 else 0
+                    memory_total_gb = snapshot.cluster_mem_total_mb / 1024.0
                     node_count = snapshot.node_count
 
-                    # Calculate utilization
-                    cpu_utilization = (cpu_total - cpu_free) / cpu_total if cpu_total > 0 else 0
-                    gpu_utilization = (gpu_total - gpu_free) / gpu_total if gpu_total > 0 else 0
-                    memory_utilization = (memory_total - memory_free) / memory_total if memory_total > 0 else 0
+                    # Calculate utilization from new fields
+                    cpu_utilization = snapshot.cluster_cpu_usage_percent / 100.0 if snapshot.cluster_cpu_total_cores > 0 else 0
+                    gpu_utilization = 0  # Placeholder since GPU info is not in new structure
+                    memory_utilization = snapshot.cluster_mem_usage_percent / 100.0 if snapshot.cluster_mem_total_mb > 0 else 0
+
+                    # Get cluster health to display score
+                    health = cluster_monitor.cluster_manager.health_status.get(name)
+                    score = health.score if health else 0.0
 
                     # Display cluster info with emojis
                     logger.info(f"✅ 集群 [{name}]")
                     logger.info(f"   📍 地址: {metadata.head_address}")
                     logger.info(f"   💻 CPU: {cpu_free}/{cpu_total} 核心 (使用率: {cpu_utilization:.1%})")
                     logger.info(f"   🎮 GPU: {gpu_free}/{gpu_total} 卡 (使用率: {gpu_utilization:.1%})")
-                    logger.info(f"   🧠 内存: {memory_free/1024/1024/1024:.1f}/{memory_total/1024/1024/1024:.1f} GB (使用率: {memory_utilization:.1%})")
+                    logger.info(f"   🧠 内存: {memory_free_gb:.1f}/{memory_total_gb:.1f} GB (使用率: {memory_utilization:.1%})")
                     logger.info(f"   🖥️  节点数: {node_count}")
                     logger.info(f"   ⭐ 偏好: {'是' if metadata.prefer else '否'} | 权重: {metadata.weight}")
+                    logger.info(f"   📊 评分: {score:.2f}")
                     logger.info(f"   🏷️  标签: {', '.join(metadata.tags) if metadata.tags else '无'}")
 
                     # Add to lists
                     connected_clusters.append(name)
-                    available_clusters.append((name, cpu_free, memory_free))
+                    available_clusters.append((name, cpu_free, memory_free_gb))
                     if metadata.prefer:
                         preferred_clusters.append(name)
                 else:
@@ -252,6 +345,13 @@ class UnifiedScheduler:
                 name=name,
                 preferred_cluster=preferred_cluster
             )
+            # When a task is submitted, ensure the health checker is running
+            if self._health_checker_stop_event.is_set():
+                # Restart the health checker if it was stopped
+                cluster_monitor = self.task_lifecycle_manager.cluster_monitor if self.task_lifecycle_manager else None
+                if cluster_monitor:
+                    self._start_health_checker_thread(cluster_monitor)
+
             logger.info(f"Task {name} submitted successfully with task_id: {task_id}")
             return task_id, result
         except Exception as e:
@@ -325,6 +425,13 @@ class UnifiedScheduler:
                 name=name,
                 preferred_cluster=preferred_cluster
             )
+            # When an actor is submitted, ensure the health checker is running
+            if self._health_checker_stop_event.is_set():
+                # Restart the health checker if it was stopped
+                cluster_monitor = self.task_lifecycle_manager.cluster_monitor if self.task_lifecycle_manager else None
+                if cluster_monitor:
+                    self._start_health_checker_thread(cluster_monitor)
+
             logger.info(f"Actor {name} submitted successfully with actor_id: {actor_id}")
             return actor_id, actor_instance
         except Exception as e:

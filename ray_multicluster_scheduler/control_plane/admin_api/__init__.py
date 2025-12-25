@@ -6,6 +6,7 @@ from typing import Dict, List, Any
 from ray_multicluster_scheduler.scheduler.cluster.cluster_registry import ClusterRegistry
 from ray_multicluster_scheduler.scheduler.queue.task_queue import TaskQueue
 from ray_multicluster_scheduler.scheduler.health.health_checker import HealthChecker
+from ray_multicluster_scheduler.scheduler.health.metrics_aggregator import MetricsAggregator
 from ray_multicluster_scheduler.common.logging import get_logger
 
 logger = get_logger(__name__)
@@ -14,10 +15,12 @@ logger = get_logger(__name__)
 class AdminAPI:
     """Provides administrative APIs for monitoring and managing the scheduler."""
 
-    def __init__(self, cluster_registry: ClusterRegistry, task_queue: TaskQueue, health_checker: HealthChecker):
+    def __init__(self, cluster_registry: ClusterRegistry, task_queue: TaskQueue, health_checker: HealthChecker, metrics_aggregator: MetricsAggregator, cluster_monitor):
         self.cluster_registry = cluster_registry
         self.task_queue = task_queue
         self.health_checker = health_checker
+        self.metrics_aggregator = metrics_aggregator
+        self.cluster_monitor = cluster_monitor
 
     def get_cluster_status(self) -> Dict[str, Dict]:
         """Get status information for all clusters."""
@@ -34,8 +37,9 @@ class AdminAPI:
 
     def get_health_status(self) -> Dict[str, str]:
         """Get health status of all clusters."""
-        # Refresh health information
-        snapshots = self.health_checker.check_health()
+        # Get snapshots from global state
+        cluster_info = self.cluster_monitor.get_all_cluster_info()
+        snapshots = {name: info['snapshot'] for name, info in cluster_info.items() if info['snapshot'] is not None}
 
         # Determine health status for each cluster
         health_status = {}
@@ -46,23 +50,6 @@ class AdminAPI:
                 health_status[cluster_name.name] = "UNHEALTHY"
 
         return health_status
-
-    def trigger_health_check(self) -> Dict[str, Dict]:
-        """Manually trigger a health check and return results."""
-        snapshots = self.health_checker.check_health()
-        self.cluster_registry.refresh_resource_snapshots()
-
-        # Format results for display
-        results = {}
-        for name, snapshot in snapshots.items():
-            results[name] = {
-                "node_count": snapshot.node_count,
-                "available_resources": snapshot.available_resources,
-                "total_resources": snapshot.total_resources,
-                "timestamp": snapshot.timestamp
-            }
-
-        return results
 
     def get_scheduler_stats(self) -> Dict[str, Any]:
         """Get overall scheduler statistics."""

@@ -30,6 +30,9 @@ class ResultCollector:
         except ray.exceptions.GetTimeoutError:
             logger.error("Task timed out while waiting for result")
             raise TaskSubmissionError("Task timed out while waiting for result")
+        except ConnectionError as e:
+            logger.error(f"Connection error while collecting task result: {e}")
+            raise TaskSubmissionError(f"Connection error while collecting task result: {e}")
         except Exception as e:
             logger.error(f"Unexpected error while collecting task result: {e}")
             raise TaskSubmissionError(f"Unexpected error while collecting task result: {e}")
