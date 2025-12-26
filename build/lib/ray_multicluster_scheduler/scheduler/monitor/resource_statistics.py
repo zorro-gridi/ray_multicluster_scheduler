@@ -232,7 +232,7 @@ def get_cluster_level_stats(cluster_name: str = None, ray_client_pool :RayClient
         # 尝试创建placement group，如果失败则返回默认值
         try:
             pg = placement_group([{"CPU": 0.001}] * len(alive), strategy="SPREAD")
-            ray.get(pg.ready(), timeout=30)  # 设置30秒超时
+            ray.get(pg.ready(), timeout=20)  # 设置20秒超时
 
             monitors = [
                 NodeMonitor.options(
@@ -242,7 +242,7 @@ def get_cluster_level_stats(cluster_name: str = None, ray_client_pool :RayClient
                 for i in range(len(alive))
             ]
 
-            node_stats = ray.get([m.get_node_usage.remote() for m in monitors], timeout=30)  # 设置30秒超时
+            node_stats = ray.get([m.get_node_usage.remote() for m in monitors], timeout=20)  # 设置20秒超时
             logger.debug(f"Node stats collected: {len(node_stats)} nodes")
 
             cluster_stats = aggregate_cluster_usage(node_stats)
@@ -336,7 +336,7 @@ def get_node_level_stats(cluster_name: str = None, ray_client_pool :RayClientPoo
             # 尝试创建placement group，如果失败则跳过统计
             try:
                 pg = placement_group([{"CPU": 0.001}] * len(alive), strategy="SPREAD")
-                ray.get(pg.ready(), timeout=30)  # 设置30秒超时
+                ray.get(pg.ready(), timeout=20)  # 设置20秒超时
 
                 monitors = [
                     NodeMonitor.options(
@@ -346,7 +346,7 @@ def get_node_level_stats(cluster_name: str = None, ray_client_pool :RayClientPoo
                     for i in range(len(alive))
                 ]
 
-                node_stats = ray.get([m.get_node_usage.remote() for m in monitors], timeout=30)  # 设置30秒超时
+                node_stats = ray.get([m.get_node_usage.remote() for m in monitors], timeout=20)  # 设置20秒超时
                 logger.debug(f"Node stats collected: {len(node_stats)} nodes")
 
                 result = node_stats
@@ -404,7 +404,7 @@ def get_worker_level_stats(cluster_name: str = None, ray_client_pool :RayClientP
             # 尝试创建placement group，如果失败则跳过统计
             try:
                 pg = placement_group([{"CPU": 0.001}] * len(alive), strategy="SPREAD")
-                ray.get(pg.ready(), timeout=30)  # 设置30秒超时
+                ray.get(pg.ready(), timeout=20)  # 设置20秒超时
 
                 monitors = [
                     NodeMonitor.options(
@@ -414,7 +414,7 @@ def get_worker_level_stats(cluster_name: str = None, ray_client_pool :RayClientP
                     for i in range(len(alive))
                 ]
 
-                worker_stats = ray.get([m.get_worker_usage.remote() for m in monitors], timeout=30)  # 设置30秒超时
+                worker_stats = ray.get([m.get_worker_usage.remote() for m in monitors], timeout=20)  # 设置20秒超时
                 logger.debug(f"Worker stats collected: {len(worker_stats)} nodes")
 
                 result = worker_stats

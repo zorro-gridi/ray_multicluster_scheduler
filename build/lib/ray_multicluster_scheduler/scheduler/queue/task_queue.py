@@ -16,7 +16,7 @@ logger = get_logger(__name__)
 class TaskQueue:
     """A task queue implementation with both global and per-cluster queues, supporting both Task and Job types."""
 
-    def __init__(self, max_size: int = 1000):
+    def __init__(self, max_size: int = 100):
         """
         Initialize the task queue.
 
@@ -32,6 +32,70 @@ class TaskQueue:
         self.lock = threading.Lock()
         self.condition = threading.Condition(self.lock)
 
+        # Sets to track task/job IDs for deduplication
+        self.global_task_ids = set()  # Track task IDs in global queue
+        self.cluster_task_ids = defaultdict(set)  # Track task IDs in cluster queues
+        self.global_job_ids = set()  # Track job IDs in global queue
+        self.cluster_job_ids = defaultdict(set)  # Track job IDs in cluster queues
+
+    def _is_task_in_global_queue(self, task_id: str) -> bool:
+        """Check if a task with the given ID is already in the global queue."""
+        return task_id in self.global_task_ids
+
+    def _is_task_in_cluster_queue(self, task_id: str, cluster_name: str) -> bool:
+        """Check if a task with the given ID is already in the specified cluster queue."""
+        return task_id in self.cluster_task_ids[cluster_name]
+
+    def _is_job_in_global_queue(self, job_id: str) -> bool:
+        """Check if a job with the given ID is already in the global job queue."""
+        return job_id in self.global_job_ids
+
+    def _is_job_in_cluster_queue(self, job_id: str, cluster_name: str) -> bool:
+        """Check if a job with the given ID is already in the specified cluster job queue."""
+        return job_id in self.cluster_job_ids[cluster_name]
+
+    def _is_duplicate_task(self, task_desc: TaskDescription) -> bool:
+        """Check if a task with the same function and arguments is already in any queue."""
+        # Check global queue
+        for task in self.global_queue:
+            if self._tasks_have_same_content(task, task_desc):
+                return True
+        # Check cluster queues
+        for cluster_queue in self.cluster_queues.values():
+            for task in cluster_queue:
+                if self._tasks_have_same_content(task, task_desc):
+                    return True
+        return False
+
+    def _is_duplicate_job(self, job_desc: JobDescription) -> bool:
+        """Check if a job with the same entrypoint and parameters is already in any queue."""
+        # Check global job queue
+        for job in self.global_job_queue:
+            if self._jobs_have_same_content(job, job_desc):
+                return True
+        # Check cluster job queues
+        for cluster_queue in self.cluster_job_queues.values():
+            for job in cluster_queue:
+                if self._jobs_have_same_content(job, job_desc):
+                    return True
+        return False
+
+    def _tasks_have_same_content(self, task1: TaskDescription, task2: TaskDescription) -> bool:
+        """Check if two tasks have the same function and arguments (ignoring task ID)."""
+        return (task1.func_or_class == task2.func_or_class and
+                task1.args == task2.args and
+                task1.kwargs == task2.kwargs and
+                task1.resource_requirements == task2.resource_requirements and
+                task1.tags == task2.tags and
+                task1.preferred_cluster == task2.preferred_cluster)
+
+    def _jobs_have_same_content(self, job1: JobDescription, job2: JobDescription) -> bool:
+        """Check if two jobs have the same entrypoint and parameters (ignoring job ID)."""
+        return (job1.entrypoint == job2.entrypoint and
+                job1.runtime_env == job2.runtime_env and
+                job1.metadata == job2.metadata and
+                job1.preferred_cluster == job2.preferred_cluster)
+
     def enqueue_global(self, task_desc: TaskDescription) -> bool:
         """
         Add a task to the global queue.
@@ -43,11 +107,22 @@ class TaskQueue:
             True if the task was successfully enqueued, False if the queue is full
         """
         with self.condition:
+            # Check for duplicates by task ID first
+            if self._is_task_in_global_queue(task_desc.task_id):
+                logger.info(f"任务 {task_desc.task_id} 已存在于全局队列中，跳过去重添加")
+                return True  # Return True as it's already queued, no error
+
+            # Also check for duplicate by content to prevent duplicate user submissions
+            if self._is_duplicate_task(task_desc):
+                logger.info(f"任务 {task_desc.task_id} 的内容已存在于队列中，跳过去重添加")
+                return True  # Return True as a similar task is already queued, no error
+
             if len(self.global_queue) >= self.max_size:
                 logger.warning(f"全局任务队列已满，无法添加任务 {task_desc.task_id}")
                 return False
 
             self.global_queue.append(task_desc)
+            self.global_task_ids.add(task_desc.task_id)
             logger.info(f"任务 {task_desc.task_id} 已加入全局队列，当前全局队列大小: {len(self.global_queue)}")
             self.condition.notify()  # Notify waiting threads that a task is available
             return True
@@ -63,11 +138,22 @@ class TaskQueue:
             True if the job was successfully enqueued, False if the queue is full
         """
         with self.condition:
+            # Check for duplicates by job ID first
+            if self._is_job_in_global_queue(job_desc.job_id):
+                logger.info(f"作业 {job_desc.job_id} 已存在于全局作业队列中，跳过去重添加")
+                return True  # Return True as it's already queued, no error
+
+            # Also check for duplicate by content to prevent duplicate user submissions
+            if self._is_duplicate_job(job_desc):
+                logger.info(f"作业 {job_desc.job_id} 的内容已存在于队列中，跳过去重添加")
+                return True  # Return True as a similar job is already queued, no error
+
             if len(self.global_job_queue) >= self.max_size:
                 logger.warning(f"全局作业队列已满，无法添加作业 {job_desc.job_id}")
                 return False
 
             self.global_job_queue.append(job_desc)
+            self.global_job_ids.add(job_desc.job_id)
             logger.info(f"作业 {job_desc.job_id} 已加入全局作业队列，当前全局作业队列大小: {len(self.global_job_queue)}")
             self.condition.notify()  # Notify waiting threads that a job is available
             return True
@@ -84,7 +170,18 @@ class TaskQueue:
             True if the task was successfully enqueued
         """
         with self.condition:
+            # Check for duplicates in this cluster queue
+            if self._is_task_in_cluster_queue(task_desc.task_id, cluster_name):
+                logger.info(f"任务 {task_desc.task_id} 已存在于集群 {cluster_name} 队列中，跳过去重添加")
+                return True  # Return True as it's already queued, no error
+
+            # Also check for duplicate by content to prevent duplicate user submissions
+            if self._is_duplicate_task(task_desc):
+                logger.info(f"任务 {task_desc.task_id} 的内容已存在于队列中，跳过去重添加")
+                return True  # Return True as a similar task is already queued, no error
+
             self.cluster_queues[cluster_name].append(task_desc)
+            self.cluster_task_ids[cluster_name].add(task_desc.task_id)
             logger.info(f"任务 {task_desc.task_id} 已加入集群 {cluster_name} 的队列，"
                        f"当前 {cluster_name} 队列大小: {len(self.cluster_queues[cluster_name])}")
             self.condition.notify()  # Notify waiting threads that a task is available
@@ -102,7 +199,18 @@ class TaskQueue:
             True if the job was successfully enqueued
         """
         with self.condition:
+            # Check for duplicates in this cluster queue
+            if self._is_job_in_cluster_queue(job_desc.job_id, cluster_name):
+                logger.info(f"作业 {job_desc.job_id} 已存在于集群 {cluster_name} 作业队列中，跳过去重添加")
+                return True  # Return True as it's already queued, no error
+
+            # Also check for duplicate by content to prevent duplicate user submissions
+            if self._is_duplicate_job(job_desc):
+                logger.info(f"作业 {job_desc.job_id} 的内容已存在于队列中，跳过去重添加")
+                return True  # Return True as a similar job is already queued, no error
+
             self.cluster_job_queues[cluster_name].append(job_desc)
+            self.cluster_job_ids[cluster_name].add(job_desc.job_id)
             logger.info(f"作业 {job_desc.job_id} 已加入集群 {cluster_name} 的作业队列，"
                        f"当前 {cluster_name} 作业队列大小: {len(self.cluster_job_queues[cluster_name])}")
             self.condition.notify()  # Notify waiting threads that a job is available
@@ -155,6 +263,8 @@ class TaskQueue:
         with self.condition:
             if cluster_name in self.cluster_queues and self.cluster_queues[cluster_name]:
                 task_desc = self.cluster_queues[cluster_name].popleft()
+                # Remove the task ID from the tracking set
+                self.cluster_task_ids[cluster_name].discard(task_desc.task_id)
                 logger.info(f"任务 {task_desc.task_id} 已从集群 {cluster_name} 队列中取出，"
                            f"剩余 {cluster_name} 队列大小: {len(self.cluster_queues[cluster_name])}")
                 return task_desc
@@ -173,6 +283,8 @@ class TaskQueue:
         with self.condition:
             if cluster_name in self.cluster_job_queues and self.cluster_job_queues[cluster_name]:
                 job_desc = self.cluster_job_queues[cluster_name].popleft()
+                # Remove the job ID from the tracking set
+                self.cluster_job_ids[cluster_name].discard(job_desc.job_id)
                 logger.info(f"作业 {job_desc.job_id} 已从集群 {cluster_name} 作业队列中取出，"
                            f"剩余 {cluster_name} 作业队列大小: {len(self.cluster_job_queues[cluster_name])}")
                 return job_desc
@@ -193,6 +305,8 @@ class TaskQueue:
                     return None
 
             task_desc = self.global_queue.popleft()
+            # Remove the task ID from the tracking set
+            self.global_task_ids.discard(task_desc.task_id)
             logger.info(f"任务 {task_desc.task_id} 已从全局队列中取出，剩余全局队列大小: {len(self.global_queue)}")
             return task_desc
 
@@ -211,6 +325,8 @@ class TaskQueue:
                     return None
 
             job_desc = self.global_job_queue.popleft()
+            # Remove the job ID from the tracking set
+            self.global_job_ids.discard(job_desc.job_id)
             logger.info(f"作业 {job_desc.job_id} 已从全局作业队列中取出，剩余全局作业队列大小: {len(self.global_job_queue)}")
             return job_desc
 
@@ -371,10 +487,14 @@ class TaskQueue:
         with self.lock:
             if cluster_name:
                 cleared_count = len(self.cluster_queues[cluster_name])
+                # Clear the tracking set as well
+                self.cluster_task_ids[cluster_name].clear()
                 self.cluster_queues[cluster_name].clear()
                 logger.info(f"已清空集群 {cluster_name} 任务队列，清除 {cleared_count} 个任务")
             else:
                 cleared_count = len(self.global_queue)
+                # Clear the tracking set as well
+                self.global_task_ids.clear()
                 self.global_queue.clear()
                 logger.info(f"已清空全局任务队列，清除 {cleared_count} 个任务")
 
@@ -384,10 +504,14 @@ class TaskQueue:
         with self.lock:
             if cluster_name:
                 cleared_count = len(self.cluster_job_queues[cluster_name])
+                # Clear the tracking set as well
+                self.cluster_job_ids[cluster_name].clear()
                 self.cluster_job_queues[cluster_name].clear()
                 logger.info(f"已清空集群 {cluster_name} 作业队列，清除 {cleared_count} 个作业")
             else:
                 cleared_count = len(self.global_job_queue)
+                # Clear the tracking set as well
+                self.global_job_ids.clear()
                 self.global_job_queue.clear()
                 logger.info(f"已清空全局作业队列，清除 {cleared_count} 个作业")
 

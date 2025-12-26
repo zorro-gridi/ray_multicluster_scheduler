@@ -115,6 +115,11 @@ class UnifiedScheduler:
 
     def _start_health_checker_thread(self, cluster_monitor):
         """Start the background health checker thread."""
+        # Check if thread is already running
+        if self._health_checker_thread and self._health_checker_thread.is_alive():
+            logger.info("Health checker background thread is already running")
+            return
+
         # Stop any existing health checker thread
         self._stop_health_checker_thread()
 
@@ -125,7 +130,7 @@ class UnifiedScheduler:
         self._health_checker_thread = threading.Thread(
             target=self._run_health_checker,
             args=(cluster_monitor,),
-            daemon=True  # Make thread a daemon so it doesn't prevent program exit
+            daemon=False  # Make thread a non-daemon so it properly synchronizes with main process
         )
         self._health_checker_thread.start()
         logger.info("Health checker background thread started")
@@ -184,13 +189,23 @@ class UnifiedScheduler:
 
         logger.info("Health checker stopped")
 
+    def cleanup(self):
+        """Clean up resources and stop the health checker thread."""
+        self._stop_health_checker_thread()
+
     def _stop_health_checker_thread(self):
         """Stop the background health checker thread."""
         if self._health_checker_thread and self._health_checker_thread.is_alive():
             logger.info("Stopping health checker background thread...")
             self._health_checker_stop_event.set()
-            self._health_checker_thread.join(timeout=5)  # Wait up to 5 seconds for thread to finish
-            logger.info("Health checker background thread stopped")
+            # Wait for thread to finish with a timeout
+            self._health_checker_thread.join(timeout=10)  # Wait up to 10 seconds for thread to finish
+            if self._health_checker_thread.is_alive():
+                logger.warning("Health checker thread did not stop gracefully within timeout")
+            else:
+                logger.info("Health checker background thread stopped")
+        else:
+            logger.info("Health checker background thread is not running")
 
     def _display_cluster_info(self, cluster_monitor):
         """Display cluster information and resource usage."""
@@ -350,9 +365,9 @@ class UnifiedScheduler:
                 preferred_cluster=preferred_cluster
             )
             # When a task is submitted, ensure the health checker is running
-            if self._health_checker_stop_event.is_set():
-                # Restart the health checker if it was stopped
-                cluster_monitor = self.task_lifecycle_manager.cluster_monitor if self.task_lifecycle_manager else None
+            if self.task_lifecycle_manager and not self._health_checker_thread:
+                # Initialize health checker thread if not already running
+                cluster_monitor = self.task_lifecycle_manager.cluster_monitor
                 if cluster_monitor:
                     self._start_health_checker_thread(cluster_monitor)
 
@@ -427,9 +442,9 @@ class UnifiedScheduler:
             job_id_result = self.task_lifecycle_manager.submit_job(job_desc)
 
             # When a job is submitted, ensure the health checker is running
-            if self._health_checker_stop_event.is_set():
-                # Restart the health checker if it was stopped
-                cluster_monitor = self.task_lifecycle_manager.cluster_monitor if self.task_lifecycle_manager else None
+            if self.task_lifecycle_manager and not self._health_checker_thread:
+                # Initialize health checker thread if not already running
+                cluster_monitor = self.task_lifecycle_manager.cluster_monitor
                 if cluster_monitor:
                     self._start_health_checker_thread(cluster_monitor)
 
@@ -507,9 +522,9 @@ class UnifiedScheduler:
                 preferred_cluster=preferred_cluster
             )
             # When an actor is submitted, ensure the health checker is running
-            if self._health_checker_stop_event.is_set():
-                # Restart the health checker if it was stopped
-                cluster_monitor = self.task_lifecycle_manager.cluster_monitor if self.task_lifecycle_manager else None
+            if self.task_lifecycle_manager and not self._health_checker_thread:
+                # Initialize health checker thread if not already running
+                cluster_monitor = self.task_lifecycle_manager.cluster_monitor
                 if cluster_monitor:
                     self._start_health_checker_thread(cluster_monitor)
 

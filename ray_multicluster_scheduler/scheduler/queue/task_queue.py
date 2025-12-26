@@ -16,7 +16,7 @@ logger = get_logger(__name__)
 class TaskQueue:
     """A task queue implementation with both global and per-cluster queues, supporting both Task and Job types."""
 
-    def __init__(self, max_size: int = 1000):
+    def __init__(self, max_size: int = 100):
         """
         Initialize the task queue.
 
@@ -54,6 +54,48 @@ class TaskQueue:
         """Check if a job with the given ID is already in the specified cluster job queue."""
         return job_id in self.cluster_job_ids[cluster_name]
 
+    def _is_duplicate_task(self, task_desc: TaskDescription) -> bool:
+        """Check if a task with the same function and arguments is already in any queue."""
+        # Check global queue
+        for task in self.global_queue:
+            if self._tasks_have_same_content(task, task_desc):
+                return True
+        # Check cluster queues
+        for cluster_queue in self.cluster_queues.values():
+            for task in cluster_queue:
+                if self._tasks_have_same_content(task, task_desc):
+                    return True
+        return False
+
+    def _is_duplicate_job(self, job_desc: JobDescription) -> bool:
+        """Check if a job with the same entrypoint and parameters is already in any queue."""
+        # Check global job queue
+        for job in self.global_job_queue:
+            if self._jobs_have_same_content(job, job_desc):
+                return True
+        # Check cluster job queues
+        for cluster_queue in self.cluster_job_queues.values():
+            for job in cluster_queue:
+                if self._jobs_have_same_content(job, job_desc):
+                    return True
+        return False
+
+    def _tasks_have_same_content(self, task1: TaskDescription, task2: TaskDescription) -> bool:
+        """Check if two tasks have the same function and arguments (ignoring task ID)."""
+        return (task1.func_or_class == task2.func_or_class and
+                task1.args == task2.args and
+                task1.kwargs == task2.kwargs and
+                task1.resource_requirements == task2.resource_requirements and
+                task1.tags == task2.tags and
+                task1.preferred_cluster == task2.preferred_cluster)
+
+    def _jobs_have_same_content(self, job1: JobDescription, job2: JobDescription) -> bool:
+        """Check if two jobs have the same entrypoint and parameters (ignoring job ID)."""
+        return (job1.entrypoint == job2.entrypoint and
+                job1.runtime_env == job2.runtime_env and
+                job1.metadata == job2.metadata and
+                job1.preferred_cluster == job2.preferred_cluster)
+
     def enqueue_global(self, task_desc: TaskDescription) -> bool:
         """
         Add a task to the global queue.
@@ -65,10 +107,15 @@ class TaskQueue:
             True if the task was successfully enqueued, False if the queue is full
         """
         with self.condition:
-            # Check for duplicates
+            # Check for duplicates by task ID first
             if self._is_task_in_global_queue(task_desc.task_id):
                 logger.info(f"任务 {task_desc.task_id} 已存在于全局队列中，跳过去重添加")
                 return True  # Return True as it's already queued, no error
+
+            # Also check for duplicate by content to prevent duplicate user submissions
+            if self._is_duplicate_task(task_desc):
+                logger.info(f"任务 {task_desc.task_id} 的内容已存在于队列中，跳过去重添加")
+                return True  # Return True as a similar task is already queued, no error
 
             if len(self.global_queue) >= self.max_size:
                 logger.warning(f"全局任务队列已满，无法添加任务 {task_desc.task_id}")
@@ -91,10 +138,15 @@ class TaskQueue:
             True if the job was successfully enqueued, False if the queue is full
         """
         with self.condition:
-            # Check for duplicates
+            # Check for duplicates by job ID first
             if self._is_job_in_global_queue(job_desc.job_id):
                 logger.info(f"作业 {job_desc.job_id} 已存在于全局作业队列中，跳过去重添加")
                 return True  # Return True as it's already queued, no error
+
+            # Also check for duplicate by content to prevent duplicate user submissions
+            if self._is_duplicate_job(job_desc):
+                logger.info(f"作业 {job_desc.job_id} 的内容已存在于队列中，跳过去重添加")
+                return True  # Return True as a similar job is already queued, no error
 
             if len(self.global_job_queue) >= self.max_size:
                 logger.warning(f"全局作业队列已满，无法添加作业 {job_desc.job_id}")
@@ -123,6 +175,11 @@ class TaskQueue:
                 logger.info(f"任务 {task_desc.task_id} 已存在于集群 {cluster_name} 队列中，跳过去重添加")
                 return True  # Return True as it's already queued, no error
 
+            # Also check for duplicate by content to prevent duplicate user submissions
+            if self._is_duplicate_task(task_desc):
+                logger.info(f"任务 {task_desc.task_id} 的内容已存在于队列中，跳过去重添加")
+                return True  # Return True as a similar task is already queued, no error
+
             self.cluster_queues[cluster_name].append(task_desc)
             self.cluster_task_ids[cluster_name].add(task_desc.task_id)
             logger.info(f"任务 {task_desc.task_id} 已加入集群 {cluster_name} 的队列，"
@@ -146,6 +203,11 @@ class TaskQueue:
             if self._is_job_in_cluster_queue(job_desc.job_id, cluster_name):
                 logger.info(f"作业 {job_desc.job_id} 已存在于集群 {cluster_name} 作业队列中，跳过去重添加")
                 return True  # Return True as it's already queued, no error
+
+            # Also check for duplicate by content to prevent duplicate user submissions
+            if self._is_duplicate_job(job_desc):
+                logger.info(f"作业 {job_desc.job_id} 的内容已存在于队列中，跳过去重添加")
+                return True  # Return True as a similar job is already queued, no error
 
             self.cluster_job_queues[cluster_name].append(job_desc)
             self.cluster_job_ids[cluster_name].add(job_desc.job_id)

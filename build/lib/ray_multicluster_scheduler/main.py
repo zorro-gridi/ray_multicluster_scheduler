@@ -21,7 +21,7 @@ from ray_multicluster_scheduler.common.circuit_breaker import ClusterCircuitBrea
 from ray_multicluster_scheduler.scheduler.monitor.cluster_monitor import ClusterMonitor
 from ray_multicluster_scheduler.scheduler.health.metrics_aggregator import MetricsAggregator
 from ray_multicluster_scheduler.scheduler.cluster.cluster_manager import ClusterManager
-
+from ray_multicluster_scheduler.app.client_api.unified_scheduler import UnifiedScheduler
 
 logger = get_logger(__name__)
 
@@ -82,6 +82,10 @@ def main():
     # 12. Admin API
     admin_api = AdminAPI(cluster_registry, task_lifecycle_manager.task_queue, health_checker, metrics_aggregator, cluster_monitor)
 
+    # Initialize unified scheduler for health checker thread management
+    unified_scheduler = UnifiedScheduler()
+    unified_scheduler.initialize_environment()
+
     # Start the task lifecycle manager
     task_lifecycle_manager.start()
 
@@ -98,6 +102,8 @@ def main():
     finally:
         # Stop the task lifecycle manager
         task_lifecycle_manager.stop()
+        # Clean up unified scheduler resources
+        unified_scheduler.cleanup()
         logger.info("Ray Multi-Cluster Scheduler stopped")
 
 

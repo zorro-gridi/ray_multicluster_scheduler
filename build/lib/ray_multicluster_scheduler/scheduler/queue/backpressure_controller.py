@@ -28,6 +28,7 @@ class BackpressureController:
     def should_apply_backpressure(self, cluster_snapshots: Dict[str, ResourceSnapshot]) -> bool:
         """Determine if backpressure should be applied based on cluster resource utilization."""
         # Check if we should re-evaluate (at most once per second)
+        # NOTE: 每秒检查当前系统的资源快照信息
         current_time = time.time()
         if current_time - self.last_check_time < 1.0:
             return self.backpressure_active
@@ -36,35 +37,27 @@ class BackpressureController:
 
         try:
             # Calculate overall resource utilization across all clusters
-            total_available_cpu = 0
-            total_total_cpu = 0
-            total_available_memory = 0
-            total_total_memory = 0
+            # Using ResourceSnapshot data directly
+            total_cpu_used = 0
+            total_cpu_total = 0
+            total_mem_used = 0
+            total_mem_total = 0
 
             for snapshot in cluster_snapshots.values():
-                # Sum up CPU resources using new ResourceSnapshot fields
-                cpu_used = snapshot.cluster_cpu_usage_percent / 100.0 * snapshot.cluster_cpu_total_cores if snapshot.cluster_cpu_total_cores > 0 else 0
-                cpu_total = snapshot.cluster_cpu_total_cores
-                cpu_available = cpu_total - cpu_used
-
-                # Sum up memory resources (convert from MB to bytes for consistency)
-                memory_used = snapshot.cluster_mem_used_mb * 1024 * 1024  # Convert MB to bytes
-                memory_total = snapshot.cluster_mem_total_mb * 1024 * 1024  # Convert MB to bytes
-                memory_available = memory_total - memory_used
-
-                total_available_cpu += cpu_available
-                total_total_cpu += cpu_total
-                total_available_memory += memory_available
-                total_total_memory += memory_total
+                # Use ResourceSnapshot fields directly
+                total_cpu_used += snapshot.cluster_cpu_used_cores
+                total_cpu_total += snapshot.cluster_cpu_total_cores
+                total_mem_used += snapshot.cluster_mem_used_mb
+                total_mem_total += snapshot.cluster_mem_total_mb
 
             # If no resources are available, skip calculation
-            if total_total_cpu == 0 and total_total_memory == 0:
+            if total_cpu_total == 0 and total_mem_total == 0:
                 self.backpressure_active = False
                 return False
 
             # Calculate utilization ratios
-            cpu_utilization = 1.0 - (total_available_cpu / total_total_cpu) if total_total_cpu > 0 else 0
-            memory_utilization = 1.0 - (total_available_memory / total_total_memory) if total_total_memory > 0 else 0
+            cpu_utilization = total_cpu_used / total_cpu_total if total_cpu_total > 0 else 0
+            memory_utilization = total_mem_used / total_mem_total if total_mem_total > 0 else 0
 
             # Use the higher utilization of CPU or memory
             max_utilization = max(cpu_utilization, memory_utilization)
@@ -91,7 +84,6 @@ class BackpressureController:
     def get_backoff_time(self) -> float:
         """Get the recommended backoff time when backpressure is active."""
         if self.backpressure_active:
-            # Exponential backoff starting at 0.1 seconds
-            # In a real implementation, this could be more sophisticated
-            return 0.1 * (2 ** int(time.time() % 5))  # Vary backoff time
+            # Fixed backoff time of 30 seconds when backpressure is active
+            return 30.0
         return 0.0
