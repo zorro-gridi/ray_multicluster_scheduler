@@ -36,32 +36,18 @@ class Dispatcher:
             client = self._get_cluster_client(target_cluster)
 
             # 准备runtime_env配置，根据集群设置相应的home_dir环境变量
-            final_runtime_env = self._prepare_runtime_env_for_cluster_target(task_desc, target_cluster)
+            # task / actor 不需要指定 runtime_env，统一在 ray.init 初始化时配置
+            # final_runtime_env = self._prepare_runtime_env_for_cluster_target(task_desc, target_cluster)
 
             if task_desc.is_actor:
                 # Submit as actor
                 actor_class = task_desc.func_or_class
-                # 如果提供了runtime_env，则使用它
-                if final_runtime_env:
-                    actor = actor_class.options(
-                        name=task_desc.name,
-                        runtime_env=final_runtime_env
-                    ).remote(*task_desc.args, **task_desc.kwargs)
-                else:
-                    actor = actor_class.options(name=task_desc.name).remote(*task_desc.args, **task_desc.kwargs)
+                actor = actor_class.options(name=task_desc.name).remote(*task_desc.args, **task_desc.kwargs)
                 return actor
             else:
                 # Submit as remote function
                 remote_func = task_desc.func_or_class
-                # 先将普通函数转换为远程函数
-                if final_runtime_env:
-                    remote_func = ray.remote(remote_func).options(
-                        name=task_desc.name,
-                        runtime_env=final_runtime_env
-                    )
-                else:
-                    remote_func = ray.remote(remote_func).options(name=task_desc.name)
-
+                remote_func = ray.remote(remote_func).options(name=task_desc.name)
                 result = remote_func.remote(*task_desc.args, **task_desc.kwargs)
                 return result
 

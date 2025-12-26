@@ -84,6 +84,8 @@ class ConnectionLifecycleManager:
         """Ensure we are connected to the specified cluster, connecting if necessary."""
         return self.client_pool.ensure_cluster_connection(cluster_name)
 
+
+
     def establish_ray_connection(self, cluster_name: str) -> bool:
         """Establish a Ray connection to the specified cluster using runtime_env from cluster config."""
         return self.client_pool.establish_ray_connection(cluster_name)

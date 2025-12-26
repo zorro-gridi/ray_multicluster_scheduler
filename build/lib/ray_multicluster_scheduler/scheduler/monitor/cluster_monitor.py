@@ -59,7 +59,7 @@ class ClusterMonitor:
         self._resource_snapshots: Dict[str, ResourceSnapshot] = {}
 
         # 创建初始快照以确保资源数据和评分在初始化时就可用
-        self._create_initial_snapshots()
+        self._initialize_cluster_snapshots()
 
 
     def get_all_cluster_info(self) -> Dict[str, Dict[str, Any]]:
@@ -170,9 +170,14 @@ class ClusterMonitor:
             health = ClusterHealth()
             self.cluster_manager.health_status[cluster_name] = health
 
-    def _create_initial_snapshots(self):
-        """Create initial snapshots for all clusters to ensure resource data and scores are available at startup."""
-        logger.info("Creating initial snapshots for all clusters")
+    def _initialize_cluster_snapshots(self):
+        """Initialize cluster snapshots by checking which clusters don't have snapshots yet and using HealthChecker to create them.
+
+        This method ensures that all clusters have initial resource snapshots when the cluster monitor starts up.
+        It only creates snapshots for clusters that don't already have them, using the HealthChecker to perform
+        the actual health checks and resource data collection.
+        """
+        logger.info("Initializing cluster snapshots for startup")
 
         # Get cluster metadata from the cluster manager, only for clusters that don't have snapshots yet
         from ray_multicluster_scheduler.common.model import ClusterMetadata
@@ -205,9 +210,9 @@ class ClusterMonitor:
             for cluster_name, snapshot in snapshots.items():
                 self.update_resource_snapshot(cluster_name, snapshot)
 
-            logger.info(f"Created initial snapshots for {len(snapshots)} clusters")
+            logger.info(f"Initialized snapshots for {len(snapshots)} clusters")
         else:
-            logger.info("All clusters already have snapshots, no initial snapshot creation needed")
+            logger.info("All clusters already have snapshots, no initialization needed")
 
     def refresh_cluster_health(self):
         """Refresh cluster health status using the health checker."""

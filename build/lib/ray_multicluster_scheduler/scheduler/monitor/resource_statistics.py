@@ -190,7 +190,7 @@ def aggregate_cluster_usage(nodes: List[Dict]) -> Dict:
     }
 
 
-def get_cluster_level_stats(cluster_name: str = None, ray_client_pool=None) -> Dict:
+def get_cluster_level_stats(cluster_name: str = None, ray_client_pool :RayClientPool = None) -> Dict:
     """
     获取集群级别资源统计信息
     :param cluster_name: 集群名称，如果为None则使用当前连接的集群
@@ -213,7 +213,8 @@ def get_cluster_level_stats(cluster_name: str = None, ray_client_pool=None) -> D
         raise RuntimeError("Ray未初始化，请提供集群名称以建立连接")
 
     try:
-        alive = [n for n in list_nodes() if n["state"] == "ALIVE"]
+        # NOTE: ray.nodes 接口替换 list_nodes() 接口
+        alive = [n for n in ray.nodes() if n.get("Alive", False)]
         logger.debug(f"Found {len(alive)} alive nodes in the cluster")
 
         if len(alive) == 0:
@@ -260,7 +261,7 @@ def get_cluster_level_stats(cluster_name: str = None, ray_client_pool=None) -> D
         except Exception as e:
             # 检查是否是连接相关的错误
             if "Channel closed" in str(e) or "connection" in str(e).lower():
-                logger.warning(f"Connection error during resource collection: {e}")
+                logger.warning(f"Connection Closed due to Main thread finished during resource collection: {e}")
                 # 对于连接错误，返回默认值而不是抛出异常
                 cluster_stats = {
                     "cluster_cpu_usage_percent": 0.0,
@@ -301,7 +302,7 @@ def get_cluster_level_stats(cluster_name: str = None, ray_client_pool=None) -> D
     return cluster_stats
 
 
-def get_node_level_stats(cluster_name: str = None, ray_client_pool=None) -> List[Dict]:
+def get_node_level_stats(cluster_name: str = None, ray_client_pool :RayClientPool = None) -> List[Dict]:
     """
     获取节点级别资源统计信息
     :param cluster_name: 集群名称，如果为None则使用当前连接的集群
@@ -325,7 +326,8 @@ def get_node_level_stats(cluster_name: str = None, ray_client_pool=None) -> List
 
     result = []
     try:
-        alive = [n for n in list_nodes() if n["state"] == "ALIVE"]
+        # NOTE: ray.nodes 接口替换 list_nodes() 接口
+        alive = [n for n in ray.nodes() if n.get("Alive", False)]
         logger.debug(f"Found {len(alive)} alive nodes for node-level stats")
 
         if len(alive) == 0:
@@ -369,7 +371,7 @@ def get_node_level_stats(cluster_name: str = None, ray_client_pool=None) -> List
     return result
 
 
-def get_worker_level_stats(cluster_name: str = None, ray_client_pool=None) -> List[List[Dict]]:
+def get_worker_level_stats(cluster_name: str = None, ray_client_pool :RayClientPool = None) -> List[List[Dict]]:
     """
     获取工作进程级别资源统计信息
     :param cluster_name: 集群名称，如果为None则使用当前连接的集群
@@ -393,7 +395,7 @@ def get_worker_level_stats(cluster_name: str = None, ray_client_pool=None) -> Li
 
     result = []
     try:
-        alive = [n for n in list_nodes() if n["state"] == "ALIVE"]
+        alive = [n for n in ray.nodes() if n.get("Alive", False)]
         logger.debug(f"Found {len(alive)} alive nodes for worker-level stats")
 
         if len(alive) == 0:

@@ -2,6 +2,7 @@
 Job client pool for managing JobSubmissionClient connections to different clusters.
 """
 
+from re import T
 import time
 from typing import Dict, Optional, Any
 from ray.job_submission import JobSubmissionClient
@@ -48,7 +49,8 @@ class JobClientPool:
             # 创建JobSubmissionClient，JobSubmissionClient不接受runtime_env参数
             # runtime_env在提交作业时指定
             job_client = JobSubmissionClient(
-                address=job_client_address
+                address=job_client_address,
+                create_cluster_if_needed=True,
             )
 
             self.clients[cluster_metadata.name] = job_client
