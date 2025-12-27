@@ -30,6 +30,9 @@ clusters:
       conda: ts
       env_vars:
         home_dir: /home/zorro
+        PYTHONPATH: |
+          /home/zorro/project/pycharm/ray_multicluster_scheduler:
+          ${PYTHONPATH}
       working_dir: .
     tags:
       - linux
@@ -45,6 +48,9 @@ clusters:
       conda: k8s
       env_vars:
         home_dir: /Users/zorro
+        PYTHONPATH: |
+          /Users/zorro/project/pycharm/ray_multicluster_scheduler:
+          ${PYTHONPATH}
       working_dir: .
     tags:
       - macos

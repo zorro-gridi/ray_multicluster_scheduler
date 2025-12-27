@@ -1,4 +1,5 @@
 import ray
+import time
 import logging
 from typing import Dict, Optional, Callable, Any
 from ray_multicluster_scheduler.common.model import TaskDescription, ResourceSnapshot, ClusterMetadata
@@ -16,11 +17,14 @@ class Dispatcher:
     """Handles dispatching tasks to Ray clusters based on scheduling decisions."""
 
     def __init__(self, connection_manager: ConnectionLifecycleManager,
-                 circuit_breaker_manager: ClusterCircuitBreakerManager = None):
+                 circuit_breaker_manager: ClusterCircuitBreakerManager = None,
+                 job_tracker = None):
         self.connection_manager = connection_manager
         self.circuit_breaker_manager = circuit_breaker_manager or ClusterCircuitBreakerManager()
         # 为每个集群维护独立的Ray客户端实例
         self.cluster_clients = {}
+        # Job 跟踪器，用于跟踪调度器提交的所有 Job
+        self.job_tracker = job_tracker
 
     def dispatch_task(self, task_desc: TaskDescription, target_cluster: str = None) -> Any:
         """Submit a task to a specified Ray cluster."""
@@ -84,12 +88,28 @@ class Dispatcher:
             final_runtime_env = self._prepare_runtime_env_for_cluster_target(job_desc, target_cluster)
 
             # Submit the job using JobSubmissionClient
+            # Ray JobSubmissionClient requires all metadata values to be strings
+            metadata_dict = {}
+            if job_desc.metadata:
+                # Convert all metadata values to strings
+                for k, v in job_desc.metadata.items():
+                    metadata_dict[k] = str(v)
+
+            # Add scheduler-specific metadata (all values must be strings)
+            metadata_dict["_scheduler_managed"] = "true"
+            metadata_dict["_scheduler_submit_time"] = str(time.time())
+
             job_id = job_client.submit_job(
-                entrypoint=job_desc.entrypoint,
+                entrypoint=job_desc.entrypoint,  # 使用包装后的 entrypoint
                 runtime_env=final_runtime_env,
-                metadata=job_desc.metadata,
+                metadata=metadata_dict,
                 job_id=job_desc.job_id
             )
+
+            # 注册 Job 到跟踪器
+            if self.job_tracker:
+                self.job_tracker.register_job(target_cluster, job_id)
+                logger.debug(f"Job {job_id} registered to tracker for cluster {target_cluster}")
 
             return job_id
 

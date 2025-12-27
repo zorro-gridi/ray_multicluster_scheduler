@@ -23,9 +23,10 @@ logger = get_logger(__name__)
 class HealthChecker:
     """Checks the health and resource status of Ray clusters."""
 
-    def __init__(self, cluster_metadata: List[ClusterMetadata], client_pool: RayClientPool):
+    def __init__(self, cluster_metadata: List[ClusterMetadata], client_pool: RayClientPool, detached_monitor=None):
         self.cluster_metadata = cluster_metadata
         self.client_pool = client_pool
+        self.detached_monitor = detached_monitor  # 引用全局的 ClusterResourceMonitor actor
         self.health_status = {}  # Add health status dictionary
 
         # Add clusters to the client pool
@@ -97,21 +98,71 @@ class HealthChecker:
         return score
 
 
-    def check_health(self) -> Dict[str, ResourceSnapshot]:
-        """Check the health of all clusters and return resource snapshots with scores."""
+    def check_health(self, use_detached_monitor: bool = True) -> Dict[str, ResourceSnapshot]:
+        """
+        Check the health of all clusters and return resource snapshots with scores.
+
+        Args:
+            use_detached_monitor: 如果为True且detached_monitor可用，直接从它读取快照；
+                                 否则自己连接到集群收集快照
+
+        Returns:
+            Dictionary mapping cluster names to their resource snapshots
+        """
         snapshots = {}
+
+        # 优先从 ClusterResourceMonitor 读取全局快照
+        if use_detached_monitor and self.detached_monitor:
+            try:
+                logger.info("Reading cluster snapshots from ClusterResourceMonitor...")
+                logger.debug(f"detached_monitor reference: {self.detached_monitor}")
+                global_snapshots = ray.get(self.detached_monitor.get_latest_snapshots.remote())
+
+                if global_snapshots:
+                    logger.info(f"Successfully retrieved {len(global_snapshots)} snapshots from ClusterResourceMonitor")
+                    # 计算每个集群的评分
+                    for cluster_name, snapshot in global_snapshots.items():
+                        # 找到对应的 cluster metadata
+                        cluster_metadata = None
+                        for cluster in self.cluster_metadata:
+                            if cluster.name == cluster_name:
+                                cluster_metadata = cluster
+                                break
+
+                        if cluster_metadata and snapshot:
+                            score = self._calculate_score(cluster_metadata, snapshot)
+                            logger.debug(f"Cluster {cluster_name} score: {score:.1f}")
+
+                        snapshots[cluster_name] = snapshot
+                    return snapshots
+                else:
+                    logger.warning("ClusterResourceMonitor returned empty snapshots, falling back to local collection")
+            except Exception as e:
+                logger.warning(f"Failed to read from ClusterResourceMonitor: {e}, falling back to local collection")
+                import traceback
+                traceback.print_exc()
+        else:
+            if not use_detached_monitor:
+                logger.info("use_detached_monitor=False, using local collection")
+            elif not self.detached_monitor:
+                logger.info("detached_monitor is None, using local collection")
+
+        # 降级方案：自己连接到集群收集快照
+        logger.info("Collecting cluster snapshots locally...")
+        logger.info(f"📋 将依次收集 {len(self.cluster_metadata)} 个集群的快照")
 
         for cluster in self.cluster_metadata:
             try:
-                logger.info(f"Starting health check for cluster {cluster.name}")
+                logger.info(f"🔍 Starting health check for cluster {cluster.name}")
 
                 # Establish connection for this specific cluster using the client pool
+                logger.info(f"   尝试连接到集群 {cluster.name} ({cluster.head_address})...")
                 success = self.client_pool.establish_ray_connection(cluster.name)
                 if not success:
-                    logger.error(f"Failed to connect to cluster {cluster.name}")
+                    logger.error(f"❌ Failed to connect to cluster {cluster.name} - 跳过此集群")
                     continue
 
-                logger.info(f"Successfully connected to cluster {cluster.name}")
+                logger.info(f"✅ Successfully connected to cluster {cluster.name}")
 
                 # Get node count
                 nodes = ray.nodes()
@@ -179,79 +230,6 @@ class HealthChecker:
                     self.client_pool.mark_cluster_disconnected(cluster.name)
 
         return snapshots
-
-    def _create_initial_snapshots(self):
-        """Create initial snapshots for all clusters during initialization."""
-        logger.info("Creating initial snapshots for all clusters")
-        for cluster in self.cluster_metadata:
-            try:
-                logger.info(f"Creating initial snapshot for cluster {cluster.name}")
-
-                # Establish connection for this specific cluster using the client pool
-                success = self.client_pool.establish_ray_connection(cluster.name)
-                if not success:
-                    logger.error(f"Failed to connect to cluster {cluster.name} for initial snapshot")
-                    continue
-
-                logger.info(f"Successfully connected to cluster {cluster.name} for initial snapshot")
-
-                # Get node count
-                nodes = ray.nodes()
-                node_count = len(nodes)
-                logger.debug(f"Found {node_count} nodes for cluster {cluster.name}")
-
-                # Try to get detailed resource statistics using the new interface
-                try:
-                    # Use the new resource statistics interface to get real metrics
-                    # Pass the client pool to ensure connection management is handled properly
-                    logger.debug(f"Calling get_cluster_level_stats for initial snapshot of cluster {cluster.name}")
-                    cluster_stats = get_cluster_level_stats(cluster_name=cluster.name, ray_client_pool=self.client_pool)
-
-                    logger.debug(f"Received cluster_stats for {cluster.name} (initial): {cluster_stats}")
-
-                    # Check if cluster_stats is None before accessing its attributes
-                    if cluster_stats is None:
-                        logger.warning(f"cluster_stats is None for {cluster.name}, using default values")
-                        raise ValueError("cluster_stats is None")
-
-                    # Create resource snapshot with actual metrics from the new interface
-                    snapshot = ResourceSnapshot(
-                        cluster_name=cluster.name,
-                        cluster_cpu_usage_percent=cluster_stats.get('cluster_cpu_usage_percent', 0.0),
-                        cluster_mem_usage_percent=cluster_stats.get('cluster_mem_usage_percent', 0.0),
-                        cluster_cpu_used_cores=cluster_stats.get('cluster_cpu_used_cores', 0.0),
-                        cluster_cpu_total_cores=cluster_stats.get('cluster_cpu_total_cores', 0.0),
-                        cluster_mem_used_mb=cluster_stats.get('cluster_mem_used_mb', 0.0),
-                        cluster_mem_total_mb=cluster_stats.get('cluster_mem_total_mb', 0.0),
-                        node_count=node_count,
-                        timestamp=time.time(),
-                        node_stats=None
-                    )
-                    logger.info(f"Created initial snapshot for {cluster.name} with stats: CPU usage={snapshot.cluster_cpu_usage_percent}%, Mem usage={snapshot.cluster_mem_usage_percent}%")
-                except Exception as e:
-                    logger.warning(f"Failed to get detailed stats for {cluster.name} (initial), using defaults: {e}")
-                    import traceback
-                    traceback.print_exc()
-                    # Fallback to default values if detailed stats fail
-                    snapshot = ResourceSnapshot(
-                        cluster_name=cluster.name,
-                        cluster_cpu_usage_percent=0.0,
-                        cluster_mem_usage_percent=0.0,
-                        cluster_cpu_used_cores=0.0,
-                        cluster_cpu_total_cores=0.0,
-                        cluster_mem_used_mb=0.0,
-                        cluster_mem_total_mb=0.0,
-                        node_count=node_count,
-                        timestamp=time.time(),
-                        node_stats=None
-                    )
-            except Exception as e:
-                logger.error(f"Initial snapshot creation failed for cluster {cluster.name}: {e}")
-                import traceback
-                traceback.print_exc()
-                # Mark the client as disconnected but keep the entry
-                if self.client_pool:
-                    self.client_pool.mark_cluster_disconnected(cluster.name)
 
     def update_cluster_manager_health(self, cluster_manager: ClusterManager):
         """Update cluster manager's health status with current health check results."""

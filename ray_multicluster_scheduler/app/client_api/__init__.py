@@ -7,6 +7,7 @@ from .unified_scheduler import (
     UnifiedScheduler,
     get_unified_scheduler,
     initialize_scheduler_environment,
+    reset_scheduler_environment,
     submit_task as unified_submit_task,
     submit_actor as unified_submit_actor
 )
@@ -22,6 +23,7 @@ __all__ = [
     "UnifiedScheduler",
     "get_unified_scheduler",
     "initialize_scheduler_environment",
+    "reset_scheduler_environment",
     "unified_submit_task",
     "unified_submit_actor"
 ]

@@ -22,13 +22,15 @@ logger = get_logger(__name__)
 class TaskLifecycleManager:
     """Manages the lifecycle of tasks in the multicluster scheduler."""
 
-    def __init__(self, cluster_monitor: ClusterMonitor):
+    def __init__(self, cluster_monitor: ClusterMonitor, job_tracker=None):
         self.cluster_monitor = cluster_monitor
         self.policy_engine = PolicyEngine()
         # 初始化client_pool和connection_manager
         self.client_pool = cluster_monitor.client_pool
         self.connection_manager = ConnectionLifecycleManager(self.client_pool)
-        self.dispatcher = Dispatcher(self.connection_manager)
+        # 传递 job_tracker 到 Dispatcher
+        self.job_tracker = job_tracker
+        self.dispatcher = Dispatcher(self.connection_manager, job_tracker=job_tracker)
         self.task_queue = TaskQueue(max_size=100)
         # Initialize backpressure controller
         self.backpressure_controller = BackpressureController(threshold=0.8)
@@ -71,13 +73,21 @@ class TaskLifecycleManager:
             logger.info("Task lifecycle manager started")
 
     def stop(self):
-        """Stop the task lifecycle manager."""
+        """Stop the task lifecycle manager and cleanup resources."""
         logger.info("Stopping task lifecycle manager...")
         self.running = False
         if self.worker_thread and self.worker_thread.is_alive():
+            logger.info("Waiting for worker thread to stop...")
             self.worker_thread.join(timeout=5.0)  # Wait up to 5 seconds for graceful shutdown
             if self.worker_thread.is_alive():
                 logger.warning("Task lifecycle manager worker thread did not stop gracefully")
+            else:
+                logger.info("Worker thread stopped successfully")
+
+        # Clear all task queues
+        logger.info("Clearing all task queues...")
+        self._clear_all_queues()
+
         logger.info("Task lifecycle manager stopped")
 
     def _initialize_connections(self):
@@ -375,6 +385,49 @@ class TaskLifecycleManager:
                 else:
                     self.task_queue.enqueue(task_desc)
             return None
+
+    def _clear_all_queues(self):
+        """Clear all pending tasks and jobs from queues."""
+        try:
+            # Clear global task queue
+            cleared_tasks = 0
+            while True:
+                task = self.task_queue.dequeue()
+                if task is None:
+                    break
+                cleared_tasks += 1
+
+            # Clear cluster-specific task queues
+            for cluster_name in self.task_queue.get_cluster_queue_names():
+                while True:
+                    task = self.task_queue.dequeue_from_cluster(cluster_name)
+                    if task is None:
+                        break
+                    cleared_tasks += 1
+
+            # Clear global job queue
+            cleared_jobs = 0
+            while True:
+                job = self.task_queue.dequeue_job()
+                if job is None:
+                    break
+                cleared_jobs += 1
+
+            # Clear cluster-specific job queues
+            for cluster_name in self.task_queue.get_cluster_job_queue_names():
+                while True:
+                    job = self.task_queue.dequeue_from_cluster_job(cluster_name)
+                    if job is None:
+                        break
+                    cleared_jobs += 1
+
+            # Clear tracked queued tasks and jobs
+            self.queued_tasks.clear()
+            self.queued_jobs.clear()
+
+            logger.info(f"Cleared {cleared_tasks} pending tasks and {cleared_jobs} pending jobs from queues")
+        except Exception as e:
+            logger.error(f"Error clearing queues: {e}")
 
     def _worker_loop(self):
         """Main worker loop that processes tasks and jobs from the queue."""

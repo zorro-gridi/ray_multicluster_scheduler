@@ -106,10 +106,20 @@ class JobClientPool:
         if cluster_name not in self.clients:
             raise ValueError(f"Unknown cluster: {cluster_name}")
 
-        job_client = self.clients[cluster_name]
-        job_client.stop_job(job_id)
-
-        logger.info(f"Stopped job {job_id} on cluster {cluster_name}")
+        try:
+            job_client = self.clients[cluster_name]
+            # Try to stop the job first
+            job_client.stop_job(job_id)
+            logger.info(f"Stopped job {job_id} on cluster {cluster_name}")
+        except Exception as e:
+            # If stop_job fails, try to delete the job
+            logger.warning(f"Failed to stop job {job_id}, attempting to delete: {e}")
+            try:
+                job_client.delete_job(job_id)
+                logger.info(f"Deleted job {job_id} on cluster {cluster_name}")
+            except Exception as delete_error:
+                logger.error(f"Failed to delete job {job_id}: {delete_error}")
+                raise
 
     def list_jobs(self, cluster_name: str):
         """List all jobs on a cluster."""

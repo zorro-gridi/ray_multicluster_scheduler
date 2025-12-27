@@ -1,29 +1,21 @@
-"""
-Client API for submitting tasks to the ray multicluster scheduler.
-"""
+"""Submit tasks to the multicluster scheduler."""
 
-from typing import Callable, Any, Dict, List, Optional, Tuple
 import ray
-from ray.job_submission import JobSubmissionClient
+import time
+import signal
+import sys
+from typing import Callable, Dict, List, Optional, Tuple, Any
 from ray_multicluster_scheduler.common.model import TaskDescription
 from ray_multicluster_scheduler.common.logging import get_logger
+from ray_multicluster_scheduler.app.client_api.unified_scheduler import (
+    get_unified_scheduler, initialize_scheduler_environment
+)
 
 logger = get_logger(__name__)
 
-# Global task lifecycle manager instance
-_task_lifecycle_manager: Optional[Any] = None
-# 标记是否已经尝试过初始化
+# Global state for the task scheduler
+_task_lifecycle_manager = None
 _initialization_attempted = False
-
-# 存储任务结果的字典
-_task_results = {}
-
-
-def initialize_scheduler(task_lifecycle_manager: Any):
-    """Initialize the scheduler with a task lifecycle manager."""
-    global _task_lifecycle_manager
-    _task_lifecycle_manager = task_lifecycle_manager
-    _task_lifecycle_manager.start()
 
 
 def _ensure_scheduler_initialized():
@@ -43,7 +35,6 @@ def _ensure_scheduler_initialized():
 
     # 惰性初始化：使用默认配置初始化调度器
     logger.info("Lazy initializing scheduler with default configuration...")
-    from ray_multicluster_scheduler.app.client_api.unified_scheduler import initialize_scheduler_environment
     task_lifecycle_manager = initialize_scheduler_environment()
     initialize_scheduler(task_lifecycle_manager)
 
@@ -55,18 +46,24 @@ def submit_task(func: Callable, args: tuple = (), kwargs: dict = None,
     """
     Submit a task to the scheduler.
 
+    This function submits a function to be executed on one of the available Ray clusters.
+    The task will be scheduled based on resource availability and cluster preferences.
+
     Args:
-        func: The function to execute remotely
-        args: Positional arguments for the function
-        kwargs: Keyword arguments for the function
-        resource_requirements: Dictionary of resource requirements (e.g., {"CPU": 2, "GPU": 1})
-        tags: List of tags to associate with the task
-        name: Optional name for the task
-        preferred_cluster: Optional preferred cluster name for task execution
+        func (Callable): The function to execute remotely
+        args (tuple, optional): Arguments to pass to the function. Defaults to ().
+        kwargs (dict, optional): Keyword arguments to pass to the function. Defaults to None.
+        resource_requirements (Dict[str, float], optional):
+            Dictionary of resource requirements (e.g., {"CPU": 2, "GPU": 1}).
+            Defaults to None.
+        tags (List[str], optional): List of tags to associate with the task. Defaults to None.
+        name (str, optional): Optional name for the task. Defaults to "".
+        preferred_cluster (str, optional): Preferred cluster name for task execution.
+            If specified cluster is unavailable, scheduler will fallback to other clusters.
 
     Returns:
-        A tuple containing (task_id, result) where task_id is the unique identifier
-        for the submitted task and result is the task result.
+        Tuple[str, Any]: A tuple containing (task_id, result) where task_id is the
+        unique identifier for the submitted task and result is the execution result.
 
     Note:
         This function now supports concurrent task submissions. Multiple tasks can be
@@ -115,39 +112,25 @@ def submit_task(func: Callable, args: tuple = (), kwargs: dict = None,
 
     logger.info(f"Submitted task {task_desc.task_id} to scheduler")
 
-    # 对于普通任务，future是任务结果本身，不需要调用ray.get()
-    # 存储任务结果供后续查询
-    _task_results[task_desc.task_id] = future
-    return task_desc.task_id, future
+    # Wait for the result and return it
+    try:
+        result = ray.get(future)
+        return task_desc.task_id, result
+    except Exception as e:
+        logger.error(f"Error getting result for task {task_desc.task_id}: {e}")
+        raise
 
 
-def get_task_result(task_id: str) -> Any:
+def initialize_scheduler(task_lifecycle_manager):
     """
-    Get the result of a previously submitted task.
+    Initialize the submit_task module with a task lifecycle manager.
+
+    This function must be called before submitting any tasks. It sets up the
+    global state needed for task submission.
 
     Args:
-        task_id: The ID of the task to get result for
-
-    Returns:
-        The task result, or None if task not found or not completed
+        task_lifecycle_manager: The task lifecycle manager to use for scheduling
     """
-    global _task_results
-    return _task_results.get(task_id)
-
-
-def get_task_status(task_id: str) -> str:
-    """
-    Get the status of a previously submitted task.
-
-    Args:
-        task_id: The ID of the task to get status for
-
-    Returns:
-        The status of the task (e.g., "SUBMITTED", "RUNNING", "COMPLETED", "FAILED")
-    """
-    global _task_results
-    if task_id in _task_results:
-        return "COMPLETED"
-    else:
-        # 这里应该查询实际的任务状态，目前简化处理
-        return "UNKNOWN"
+    global _task_lifecycle_manager
+    _task_lifecycle_manager = task_lifecycle_manager
+    logger.info("✅ submit_task scheduler initialized")
