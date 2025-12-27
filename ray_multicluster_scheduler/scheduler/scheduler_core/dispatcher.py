@@ -103,7 +103,7 @@ class Dispatcher:
                 entrypoint=job_desc.entrypoint,  # 使用包装后的 entrypoint
                 runtime_env=final_runtime_env,
                 metadata=metadata_dict,
-                job_id=job_desc.job_id
+                submission_id=job_desc.submission_id or job_desc.job_id  # 使用 submission_id 代替已弃用的 job_id
             )
 
             # 注册 Job 到跟踪器

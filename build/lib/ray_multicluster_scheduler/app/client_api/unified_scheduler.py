@@ -894,12 +894,9 @@ class UnifiedScheduler:
                 name=name,
                 preferred_cluster=preferred_cluster
             )
-            # When a task is submitted, ensure the health checker is running
-            if self.task_lifecycle_manager and not self._health_checker_thread:
-                # Initialize health checker thread if not already running
-                cluster_monitor = self.task_lifecycle_manager.cluster_monitor
-                if cluster_monitor:
-                    self._start_health_checker_thread(cluster_monitor)
+            # 注意：不再启动前台健康检查线程
+            # BackgroundHealthChecker (detached actor) 已在后台全局收集快照
+            # submit_task 执行完成后应立即退出，不需要前台监控线程
 
             logger.info(f"Task {name} submitted successfully with task_id: {task_id}")
             return task_id, result
@@ -971,12 +968,9 @@ class UnifiedScheduler:
             # Submit job using the task lifecycle manager
             job_id_result = self.task_lifecycle_manager.submit_job(job_desc)
 
-            # When a job is submitted, ensure the health checker is running
-            if self.task_lifecycle_manager and not self._health_checker_thread:
-                # Initialize health checker thread if not already running
-                cluster_monitor = self.task_lifecycle_manager.cluster_monitor
-                if cluster_monitor:
-                    self._start_health_checker_thread(cluster_monitor)
+            # 注意：不再启动前台健康检查线程
+            # BackgroundHealthChecker (detached actor) 已在后台全局收集快照
+            # submit_job 通过 JobSubmissionClient 独立管理，不需要前台监控线程
 
             logger.info(f"Job {job_id or 'auto-generated'} submitted successfully with job_id: {job_id_result}")
             return job_id_result
@@ -1051,12 +1045,9 @@ class UnifiedScheduler:
                 name=name,
                 preferred_cluster=preferred_cluster
             )
-            # When an actor is submitted, ensure the health checker is running
-            if self.task_lifecycle_manager and not self._health_checker_thread:
-                # Initialize health checker thread if not already running
-                cluster_monitor = self.task_lifecycle_manager.cluster_monitor
-                if cluster_monitor:
-                    self._start_health_checker_thread(cluster_monitor)
+            # 注意：不再启动前台健康检查线程
+            # BackgroundHealthChecker (detached actor) 已在后台全局收集快照
+            # submit_actor 执行完成后应立即退出，不需要前台监控线程
 
             logger.info(f"Actor {name} submitted successfully with actor_id: {actor_id}")
             return actor_id, actor_instance
