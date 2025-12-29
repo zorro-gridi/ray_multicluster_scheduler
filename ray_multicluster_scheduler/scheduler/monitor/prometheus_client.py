@@ -431,5 +431,5 @@ def get_cluster_health_status(cluster_name: str) -> bool:
 
 
 if __name__ == '__main__':
-    print(get_cluster_health_status('mac'))
-    print(get_cluster_resource_snapshot('mac'))
+    print(get_cluster_health_status('centos'))
+    print(get_cluster_resource_snapshot('centos'))

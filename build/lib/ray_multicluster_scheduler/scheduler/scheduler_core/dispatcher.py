@@ -1,5 +1,6 @@
 import ray
 import logging
+from pprint import pprint
 from typing import Dict, Optional, Callable, Any
 from ray_multicluster_scheduler.common.model import TaskDescription, ResourceSnapshot, ClusterMetadata
 from ray_multicluster_scheduler.common.model.job_description import JobDescription
@@ -225,5 +226,6 @@ class Dispatcher:
                 # (user settings are already in final_runtime_env, so no action needed)
                 pass
 
-        logger.info(f"Merged runtime_env for target {target_desc.job_id if hasattr(target_desc, 'job_id') else target_desc.task_id} on cluster {cluster_name}: {final_runtime_env}")
+        logger.info(f"Merged runtime_env for target {target_desc.job_id if hasattr(target_desc, 'job_id') else target_desc.task_id} on cluster {cluster_name}:")
+        pprint(final_runtime_env)
         return final_runtime_env

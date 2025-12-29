@@ -508,8 +508,7 @@ def initialize_scheduler_environment(config_file_path: Optional[str] = None) -> 
         scheduler = get_unified_scheduler()
         task_lifecycle_manager = scheduler.initialize_environment(config_file_path=config_file_path)
 
-        # 同步初始化submit_task和submit_actor模块中的调度器，确保它们使用相同的配置
-        # submit_job模块将在实际调用时按需初始化
+        # 同步初始化submit_task、submit_actor和submit_job模块中的调度器，确保它们使用相同的配置
         try:
             from ray_multicluster_scheduler.app.client_api.submit_task import initialize_scheduler as init_task_scheduler
             init_task_scheduler(task_lifecycle_manager)
@@ -521,6 +520,12 @@ def initialize_scheduler_environment(config_file_path: Optional[str] = None) -> 
             init_actor_scheduler(task_lifecycle_manager)
         except Exception as e:
             logger.warning(f"Failed to initialize submit_actor scheduler: {e}")
+
+        try:
+            from ray_multicluster_scheduler.app.client_api.submit_job import initialize_scheduler as init_job_scheduler
+            init_job_scheduler(task_lifecycle_manager)
+        except Exception as e:
+            logger.warning(f"Failed to initialize submit_job scheduler: {e}")
 
         return task_lifecycle_manager
     except Exception as e:
