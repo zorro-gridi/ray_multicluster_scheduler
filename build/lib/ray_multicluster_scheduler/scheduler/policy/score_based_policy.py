@@ -26,11 +26,11 @@ class ScoreBasedPolicy:
             # This is a basic implementation - a production system would have more sophisticated scoring
             # Calculate available resources from new metrics
             cpu_available = snapshot.cluster_cpu_total_cores - snapshot.cluster_cpu_used_cores
-            memory_available_gb = (snapshot.cluster_mem_total_mb - snapshot.cluster_mem_used_mb) / 1024.0  # Convert MB to GB
+            memory_available_gib = (snapshot.cluster_mem_total_mb - snapshot.cluster_mem_used_mb) / 1024.0  # Convert MB to GiB
 
             # Use absolute resource values for scoring instead of normalized values
             # This approach values actual resource availability rather than relative usage
-            total_score = cpu_available + memory_available_gb  # Simple combination of absolute available resources
+            total_score = cpu_available + memory_available_gib  # Simple combination of absolute available resources
             scores[cluster_name] = total_score
 
         # Check if we have any clusters to evaluate

@@ -40,12 +40,14 @@ class ResourceSnapshot:
     """Snapshot of cluster resources."""
     cluster_name: str
     # 集群级别资源统计
-    cluster_cpu_usage_percent: float = 0.0
-    cluster_mem_usage_percent: float = 0.0
+    cluster_cpu_usage_percent: float = 0.0  # CPU使用率百分比，保留两位小数
+    cluster_mem_usage_percent: float = 0.0  # 内存使用率百分比，保留两位小数
     cluster_cpu_used_cores: float = 0.0
     cluster_cpu_total_cores: float = 0.0
-    cluster_mem_used_mb: float = 0.0
-    cluster_mem_total_mb: float = 0.0
+    cluster_mem_used_mb: float = 0.0  # 内存使用量，单位MB
+    cluster_mem_total_mb: float = 0.0  # 内存总量，单位MB
+    cluster_mem_used_gib: float = 0.0  # 内存使用量，单位GiB
+    cluster_mem_total_gib: float = 0.0  # 内存总量，单位GiB
     # 节点数量
     node_count: int = 0
     # 时间戳

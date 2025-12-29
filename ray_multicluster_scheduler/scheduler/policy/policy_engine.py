@@ -7,6 +7,7 @@ from ray_multicluster_scheduler.scheduler.policy.enhanced_score_based_policy imp
 from ray_multicluster_scheduler.scheduler.policy.tag_affinity_policy import TagAffinityPolicy
 from ray_multicluster_scheduler.common.logging import get_logger
 from ray_multicluster_scheduler.common.exception import PolicyEvaluationError
+from ray_multicluster_scheduler.scheduler.monitor.cluster_monitor import ClusterMonitor
 
 logger = get_logger(__name__)
 
@@ -17,9 +18,14 @@ class PolicyEngine:
     # 定义资源使用率阈值，超过此阈值时任务将进入队列等待
     RESOURCE_THRESHOLD = 0.8  # 80%
 
-    def __init__(self, cluster_monitor=None):
+    def __init__(self, cluster_monitor: ClusterMonitor):
+        if cluster_monitor is None:
+            raise ValueError("cluster_monitor cannot be None. Strategy engine requires valid cluster state parameters.")
+
         self.cluster_monitor = cluster_monitor
         self.policies = []
+        # Initialize cluster metadata
+        self._cluster_metadata = {}
 
         # Initialize default policies
         self.score_policy = EnhancedScoreBasedPolicy()
@@ -50,12 +56,30 @@ class PolicyEngine:
         if policy in self.policies:
             self.policies.remove(policy)
 
-    def schedule(self, task_desc: TaskDescription, cluster_snapshots: Dict[str, ResourceSnapshot]) -> SchedulingDecision:
+    def schedule(self, task_desc: TaskDescription) -> SchedulingDecision:
         """Evaluate all policies and make a scheduling decision according to specified rules."""
+        # 在调度时直接获取最新的集群资源快照和集群元数据
+        cluster_info = self.cluster_monitor.get_all_cluster_info() if self.cluster_monitor else {}
+        cluster_snapshots = {name: info['snapshot'] for name, info in cluster_info.items()
+                          if info['snapshot'] is not None}
+        cluster_metadata = {name: info['metadata'] for name, info in cluster_info.items()}
+
+        # 更新集群元数据
+        self._cluster_metadata = cluster_metadata
+
         return self._make_scheduling_decision(task_desc, cluster_snapshots)
 
-    def schedule_job(self, job_desc: JobDescription, cluster_snapshots: Dict[str, ResourceSnapshot]) -> SchedulingDecision:
+    def schedule_job(self, job_desc: JobDescription) -> SchedulingDecision:
         """Schedule a job using the same policies as tasks, by converting the job to a task description."""
+        # 在调度时直接获取最新的集群资源快照和集群元数据
+        cluster_info = self.cluster_monitor.get_all_cluster_info() if self.cluster_monitor else {}
+        cluster_snapshots = {name: info['snapshot'] for name, info in cluster_info.items()
+                          if info['snapshot'] is not None}
+        cluster_metadata = {name: info['metadata'] for name, info in cluster_info.items()}
+
+        # 更新集群元数据
+        self._cluster_metadata = cluster_metadata
+
         # Convert job description to task description to reuse existing scheduling logic
         task_desc = job_desc.as_task_description()
         return self._make_scheduling_decision(task_desc, cluster_snapshots)
@@ -89,7 +113,7 @@ class PolicyEngine:
 
                 if cpu_utilization > self.RESOURCE_THRESHOLD or gpu_utilization > self.RESOURCE_THRESHOLD or mem_utilization > self.RESOURCE_THRESHOLD:
                     logger.warning(f"用户指定的首选集群 {task_desc.preferred_cluster} 资源使用率超过阈值 "
-                                 f"(CPU: {cpu_utilization:.2f}, GPU: {gpu_utilization:.2f}, 内存: {mem_utilization:.2f})，任务将进入该集群的待执行队列等待")
+                                 f"(CPU: {cpu_utilization:.2%}, GPU: {gpu_utilization:.2%}, 内存: {mem_utilization:.2%})，任务将进入该集群的待执行队列等待")
                     # 返回首选集群名称，让任务进入该集群的队列等待
                     return SchedulingDecision(
                         task_id=task_desc.task_id,
@@ -160,8 +184,8 @@ class PolicyEngine:
 
                 if cpu_utilization > self.RESOURCE_THRESHOLD or gpu_utilization > self.RESOURCE_THRESHOLD or mem_utilization > self.RESOURCE_THRESHOLD:
                     logger.info(f"检测到集群 {cluster_name} 资源使用率超过阈值，触发负载均衡策略")
-                    logger.info(f"  - CPU使用率: {cpu_utilization:.2f} (阈值: {self.RESOURCE_THRESHOLD})")
-                    logger.info(f"  - 内存使用率: {mem_utilization:.2f} (阈值: {self.RESOURCE_THRESHOLD})")
+                    logger.info(f"  - CPU使用率: {cpu_utilization:.2%} (阈值: {self.RESOURCE_THRESHOLD:.2%})")
+                    logger.info(f"  - 内存使用率: {mem_utilization:.2%} (阈值: {self.RESOURCE_THRESHOLD:.2%})")
                     break  # 找到一个超阈值的集群就足够触发负载均衡
         else:
             logger.info(f"任务指定了首选集群 {task_desc.preferred_cluster}，不应用负载均衡策略")

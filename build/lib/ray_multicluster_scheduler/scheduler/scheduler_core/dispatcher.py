@@ -84,12 +84,20 @@ class Dispatcher:
             final_runtime_env = self._prepare_runtime_env_for_cluster_target(job_desc, target_cluster)
 
             # Submit the job using JobSubmissionClient
-            job_id = job_client.submit_job(
-                entrypoint=job_desc.entrypoint,
-                runtime_env=final_runtime_env,
-                metadata=job_desc.metadata,
-                job_id=job_desc.job_id
-            )
+            # Use submission_id instead of job_id as job_id is deprecated
+            submit_kwargs = {
+                'entrypoint': job_desc.entrypoint,
+                'runtime_env': final_runtime_env,
+                'metadata': job_desc.metadata,
+            }
+
+            # Add submission_id if available, otherwise fallback to job_id for backward compatibility
+            if job_desc.submission_id:
+                submit_kwargs['submission_id'] = job_desc.submission_id
+            else:
+                submit_kwargs['submission_id'] = job_desc.job_id
+
+            job_id = job_client.submit_job(**submit_kwargs)
 
             return job_id
 
@@ -153,9 +161,18 @@ class Dispatcher:
 
     def _prepare_runtime_env_for_cluster_target(self, target_desc: Any, cluster_name: str) -> Optional[Dict]:
         """Prepare runtime environment for any target (task or job) based on target cluster configuration."""
+        # 检查cluster_metadata是否为空
+        if not self.connection_manager.cluster_metadata:
+            logger.error("Connection manager's cluster_metadata is empty")
+            raise ValueError("Connection manager's cluster_metadata is empty, no clusters registered")
+
         # Get the cluster metadata
         cluster_metadata = self.connection_manager.cluster_metadata.get(cluster_name)
-        if not cluster_metadata or not hasattr(cluster_metadata, 'runtime_env'):
+        if not cluster_metadata:
+            logger.error(f"No cluster metadata found for cluster {cluster_name}")
+            raise ValueError(f"Cluster {cluster_name} is not registered in the connection manager")
+
+        if not hasattr(cluster_metadata, 'runtime_env'):
             logger.warning(f"No runtime_env configuration found for cluster {cluster_name}")
             # Return the target's runtime_env if no cluster config exists
             # Check if it's a task description
@@ -177,13 +194,36 @@ class Dispatcher:
             return cluster_runtime_env
 
         # If both target and cluster have runtime_env, merge them
-        # Cluster config takes precedence for specific keys like conda
+        # Use user settings for overlapping keys, and add cluster's unique keys
         final_runtime_env = target_runtime_env.copy()
 
-        # Override with cluster-specific settings
-        if cluster_runtime_env:
-            for key, value in cluster_runtime_env.items():
-                final_runtime_env[key] = value
+        # Find keys that exist in cluster but not in user config (the difference)
+        cluster_unique_keys = set(cluster_runtime_env.keys()) - set(target_runtime_env.keys())
+
+        # Add cluster's unique keys to final config
+        for key in cluster_unique_keys:
+            final_runtime_env[key] = cluster_runtime_env[key]
+
+        # For overlapping keys, merge values based on their types
+        overlapping_keys = set(cluster_runtime_env.keys()) & set(target_runtime_env.keys())
+        for key in overlapping_keys:
+            cluster_value = cluster_runtime_env[key]
+            user_value = target_runtime_env[key]
+
+            # Check if values are of the same type and are mergeable
+            if isinstance(cluster_value, list) and isinstance(user_value, list):
+                # For lists, merge them (union) and deduplicate
+                merged_list = list(dict.fromkeys(cluster_value + user_value))
+                final_runtime_env[key] = merged_list
+            elif isinstance(cluster_value, dict) and isinstance(user_value, dict):
+                # For dicts, merge with user settings taking precedence
+                merged_dict = cluster_value.copy()
+                merged_dict.update(user_value)
+                final_runtime_env[key] = merged_dict
+            else:
+                # For other types or mismatched types, user settings take precedence
+                # (user settings are already in final_runtime_env, so no action needed)
+                pass
 
         logger.info(f"Merged runtime_env for target {target_desc.job_id if hasattr(target_desc, 'job_id') else target_desc.task_id} on cluster {cluster_name}: {final_runtime_env}")
         return final_runtime_env

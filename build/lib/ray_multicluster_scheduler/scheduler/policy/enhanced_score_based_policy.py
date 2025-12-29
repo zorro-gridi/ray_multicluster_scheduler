@@ -61,9 +61,9 @@ class EnhancedScoreBasedPolicy:
                 # 基础评分 = 可用CPU * 集群权重
                 base_score = cpu_free * weight
 
-                # 内存资源加成 = 可用内存(GB) * 0.1 * 集群权重
-                memory_available_gb = mem_free_mb / 1024.0  # Convert MB to GB
-                memory_bonus = memory_available_gb * 0.1 * weight
+                # 内存资源加成 = 可用内存(GiB) * 0.1 * 集群权重
+                memory_available_gib = mem_free_mb / 1024.0  # Convert MB to GiB
+                memory_bonus = memory_available_gib * 0.1 * weight
 
                 # GPU 资源加成
                 gpu_bonus = gpu_free * 5  # GPU资源更宝贵

@@ -39,5 +39,6 @@ class JobDescription:
             resource_requirements=self.resource_requirements or {},
             tags=self.tags,
             preferred_cluster=self.preferred_cluster,
-            is_actor=False
+            is_actor=False,
+            runtime_env=self.runtime_env  # 添加这行来传递runtime_env
         )

@@ -10,8 +10,12 @@ from ray_multicluster_scheduler.common.logging import get_logger
 
 from ray_multicluster_scheduler.common.model import ClusterMetadata, ResourceSnapshot, ClusterHealth
 from ray_multicluster_scheduler.control_plane.config import ConfigManager
+from ray_multicluster_scheduler.scheduler.health.health_checker import HealthChecker
 
 logger = get_logger(__name__)
+
+# Cache timeout in seconds
+CACHE_TIMEOUT = 10.0  # Cache snapshots for 10 seconds to reduce HealthChecker calls
 
 
 class ClusterMonitor:
@@ -49,21 +53,42 @@ class ClusterMonitor:
         from ray_multicluster_scheduler.scheduler.connection.ray_client_pool import RayClientPool
         self.client_pool = RayClientPool(self.config_manager)
 
+        # Initialize health checker once
+        self.health_checker = self._create_health_checker()
+
         # Initialize health status for all clusters
         for name in self.cluster_manager.clusters:
             self.cluster_manager.health_status[name] = ClusterHealth()
 
+        # Initialize cache for resource snapshots to avoid repeated HealthChecker calls
+        self._cached_snapshots = {}
+        self._last_cache_update = 0.0
+
+    def _create_health_checker(self) -> HealthChecker:
+        """Create a HealthChecker instance with current cluster metadata and client pool."""
+        # 获取所有集群的元数据
+        cluster_metadata_list = []
+        for name, config in self.cluster_manager.clusters.items():
+            cluster_metadata = ClusterMetadata(
+                name=config.name,
+                head_address=config.head_address,
+                dashboard=config.dashboard,
+                prefer=config.prefer,
+                weight=config.weight,
+                runtime_env=config.runtime_env,
+                tags=config.tags
+            )
+            cluster_metadata_list.append(cluster_metadata)
         logger.info("✅ 集群监视器初始化成功")
-
-        # 初始化全局资源快照存储
-        self._resource_snapshots: Dict[str, ResourceSnapshot] = {}
-
-        # 创建初始快照以确保资源数据和评分在初始化时就可用
-        self._initialize_cluster_snapshots()
+        # 创建HealthChecker实例
+        return HealthChecker(cluster_metadata_list, self.client_pool)
 
 
     def get_all_cluster_info(self) -> Dict[str, Dict[str, Any]]:
         """Get combined metadata and resource snapshot for all clusters."""
+        # 获取最新的资源快照
+        snapshots = self.get_latest_snapshots()
+
         result = {}
 
         # 如果没有集群配置，尝试重新加载
@@ -72,10 +97,10 @@ class ClusterMonitor:
             self.config_manager.get_cluster_configs()
 
         for name, config in self.cluster_manager.clusters.items():
-            # 直接从全局快照状态管理器读取ResourceSnapshot
-            snapshot = self._resource_snapshots.get(name)
+            # 获取最新的快照
+            snapshot = snapshots.get(name)
 
-            # 如果没有全局快照，则创建一个默认快照
+            # 如果没有快照，则创建一个默认快照
             if not snapshot:
                 snapshot = ResourceSnapshot(
                     cluster_name=name,
@@ -99,127 +124,53 @@ class ClusterMonitor:
 
     def get_resource_snapshot(self, cluster_name: str) -> Optional[ResourceSnapshot]:
         """Get the latest resource snapshot for a cluster."""
-        # Directly return from the global snapshots storage
-        return self._resource_snapshots.get(cluster_name)
+        # 获取最新的资源快照
+        snapshots = self.get_latest_snapshots()
+        return snapshots.get(cluster_name)
 
     def update_resource_snapshot(self, cluster_name: str, snapshot: ResourceSnapshot):
         """Update the resource snapshot for a cluster."""
-        # Update the global snapshots storage
-        self._resource_snapshots[cluster_name] = snapshot
+        # 在简化版本中，我们不再维护全局快照存储
+        # 这个方法保留是为了兼容性，但实际的快照获取将在调用时直接从HealthChecker获取
+        pass
 
-        # Also update the cluster manager's health status with the new snapshot
-        health = self.cluster_manager.health_status.get(cluster_name)
-        if health:
-            # Update health resources based on the new snapshot
-            cpu_total = snapshot.cluster_cpu_total_cores
-            cpu_used = snapshot.cluster_cpu_used_cores
-            cpu_free = cpu_total - cpu_used
-            mem_total = snapshot.cluster_mem_total_mb
-            mem_used = snapshot.cluster_mem_used_mb
-            mem_free = mem_total - mem_used
-            cpu_utilization = snapshot.cluster_cpu_usage_percent / 100.0 if cpu_total > 0 else 0
-            mem_utilization = snapshot.cluster_mem_usage_percent / 100.0 if mem_total > 0 else 0
+    def get_latest_snapshots(self):
+        """Get the latest resource snapshots for all clusters directly from HealthChecker with caching."""
 
-            config = self.config_manager.get_cluster_config(cluster_name)
-            if config:
-                if cpu_free <= 0:
-                    score = -1
-                else:
-                    # 基础评分 = 可用CPU * 集群权重
-                    base_score = cpu_free * config.weight
+        # Check if we have a recent cache
+        current_time = time.time()
 
-                    # 内存资源加成 = 可用内存(GB) * 0.1 * 集群权重
-                    memory_available_gb = mem_free / 1024.0  # Convert MB to GB
-                    memory_bonus = memory_available_gb * 0.1 * config.weight
+        # Check if we have cached snapshots and they are still valid
+        if (current_time - self._last_cache_update) < CACHE_TIMEOUT and self._cached_snapshots:
+            # Check if all clusters are over the resource threshold
+            all_clusters_over_threshold = True
 
-                    # GPU 资源加成（由于ResourceSnapshot不提供GPU信息，暂时设为0）
-                    gpu_bonus = 0 * 5  # GPU资源更宝贵
+            # Check if any cluster has resources available
+            for cluster_name, snapshot in self._cached_snapshots.items():
+                # 使用新的资源指标
+                cpu_used_cores = snapshot.cluster_cpu_used_cores
+                cpu_total_cores = snapshot.cluster_cpu_total_cores
+                cpu_utilization = cpu_used_cores / cpu_total_cores if cpu_total_cores > 0 else 0
 
-                    # 偏好集群加成
-                    preference_bonus = 1.2 if config.prefer else 1.0
+                # 检查内存使用率
+                mem_utilization = snapshot.cluster_mem_usage_percent / 100.0 if snapshot.cluster_mem_total_mb > 0 else 0
 
-                    # 负载均衡因子：资源利用率越低得分越高
-                    load_balance_factor = 1.0 - cpu_utilization  # 负载越低因子越高
+                # GPU资源暂时不可用，使用默认值
+                gpu_utilization = 0
 
-                    # 最终评分
-                    score = (base_score + memory_bonus + gpu_bonus) * preference_bonus * load_balance_factor
+                # 检查是否任一资源使用率未超过阈值
+                if cpu_utilization <= 0.8 and gpu_utilization <= 0.8 and mem_utilization <= 0.8:
+                    all_clusters_over_threshold = False
+                    break
+
+            # 如果所有集群都超过阈值（即没有可用资源），则强制刷新资源状态
+            if all_clusters_over_threshold:
+                logger.debug("所有集群资源都超过阈值，强制刷新资源状态")
             else:
-                score = 0.0  # Default score if config is not found
+                logger.debug(f"使用缓存的快照 (年龄: {current_time - self._last_cache_update:.2f}s)")
+                return self._cached_snapshots
 
-            # Update health resources
-            health.resources = {
-                "available": {
-                    "CPU": cpu_free,
-                    "memory": mem_free * 1024 * 1024  # Convert MB to bytes to match old format
-                },
-                "total": {
-                    "CPU": cpu_total,
-                    "memory": mem_total * 1024 * 1024  # Convert MB to bytes to match old format
-                },
-                "cpu_free": cpu_free,
-                "cpu_total": cpu_total,
-                "cpu_utilization": cpu_utilization,
-                "mem_utilization": mem_utilization,
-                "node_count": snapshot.node_count
-            }
-            health.score = score  # Update the score
-            health.available = True  # Mark as available if we have a snapshot
-            health.last_checked = time.time()
-        else:
-            # Create new health status if it doesn't exist
-            health = ClusterHealth()
-            self.cluster_manager.health_status[cluster_name] = health
-
-    def _initialize_cluster_snapshots(self):
-        """Initialize cluster snapshots by checking which clusters don't have snapshots yet and using HealthChecker to create them.
-
-        This method ensures that all clusters have initial resource snapshots when the cluster monitor starts up.
-        It only creates snapshots for clusters that don't already have them, using the HealthChecker to perform
-        the actual health checks and resource data collection.
-        """
-        logger.info("Initializing cluster snapshots for startup")
-
-        # Get cluster metadata from the cluster manager, only for clusters that don't have snapshots yet
-        from ray_multicluster_scheduler.common.model import ClusterMetadata
-        cluster_metadata_list = []
-        for name, config in self.cluster_manager.clusters.items():
-            # Check if a snapshot already exists for this cluster
-            if name not in self._resource_snapshots:
-                cluster_metadata = ClusterMetadata(
-                    name=config.name,
-                    head_address=config.head_address,
-                    dashboard=config.dashboard,
-                    prefer=config.prefer,
-                    weight=config.weight,
-                    runtime_env=config.runtime_env,
-                    tags=config.tags
-                )
-                cluster_metadata_list.append(cluster_metadata)
-            else:
-                logger.debug(f"Snapshot already exists for cluster {name}, skipping initial snapshot creation")
-
-        # Create HealthChecker and update snapshots only for clusters without snapshots
-        if cluster_metadata_list:  # Only create HealthChecker if there are clusters without snapshots
-            # Use the cluster monitor's client pool for health checking
-            from ray_multicluster_scheduler.scheduler.health.health_checker import HealthChecker
-            health_checker = HealthChecker(cluster_metadata_list, self.client_pool)
-            health_checker._log_cluster_status()
-            snapshots = health_checker.check_health()
-
-            # Update cluster monitor with new snapshots
-            for cluster_name, snapshot in snapshots.items():
-                self.update_resource_snapshot(cluster_name, snapshot)
-
-            logger.info(f"Initialized snapshots for {len(snapshots)} clusters")
-        else:
-            logger.info("All clusters already have snapshots, no initialization needed")
-
-    def refresh_cluster_health(self):
-        """Refresh cluster health status using the health checker."""
-        logger.info("Refreshing cluster health status")
-
-        # Get cluster metadata from cluster manager
-        from ray_multicluster_scheduler.common.model import ClusterMetadata
+        # 获取所有集群的元数据
         cluster_metadata_list = []
         for name, config in self.cluster_manager.clusters.items():
             cluster_metadata = ClusterMetadata(
@@ -233,21 +184,22 @@ class ClusterMonitor:
             )
             cluster_metadata_list.append(cluster_metadata)
 
-        # Create HealthChecker and update cluster manager health status
-        from ray_multicluster_scheduler.scheduler.health.health_checker import HealthChecker
-        health_checker = HealthChecker(cluster_metadata_list, self.client_pool)
+        # 使用已初始化的HealthChecker获取最新的快照
+        # 重新设置health_checker的cluster_metadata，因为集群配置可能已更新
+        self.health_checker.cluster_metadata = cluster_metadata_list
+        snapshots = self.health_checker.check_health()
 
-        # Update cluster manager's health status with current health check results
-        health_checker.update_cluster_manager_health(self.cluster_manager)
+        # Update cache
+        self._cached_snapshots = snapshots
+        self._last_cache_update = current_time
 
-        # Also update the local resource snapshots
-        snapshots = health_checker.check_health()
-        for cluster_name, snapshot in snapshots.items():
-            if cluster_name in self.cluster_manager.clusters:
-                self.update_resource_snapshot(cluster_name, snapshot)
+        return snapshots
+
+    def _initialize_cluster_snapshots(self):
+        """Initialize cluster snapshots if needed. In simplified version, this is a no-op."""
+        logger.info("Cluster snapshots initialization is simplified - snapshots are fetched on demand")
+
 
     def get_best_cluster(self, requirements: Optional[Dict] = None) -> str:
         """Get the best cluster based on current health and requirements."""
-        # 确保集群状态已刷新
-        self.refresh_cluster_health()
         return self.cluster_manager.get_best_cluster(requirements)

@@ -1,0 +1,59 @@
+# name: 集群名称
+# head_address: 集群 Head 节点地址
+# dashboard: 集群仪表板地址
+# prefer: 是否优先使用此集群（布尔值）
+# weight: 集群权重（数值）
+# tags: 集群标签
+
+clusters:
+  # CentOS cluster
+  - name: centos
+    head_address: 192.168.5.7:32546
+    dashboard: http://192.168.5.7:31591
+    prefer: false
+    weight: 1.0
+    runtime_env:
+      conda: ts
+      working_dir: .
+      excludes:
+        - '*.pkl'
+        - '*.db'
+        - '*.csv'
+        - '*.log'
+      env_vars:
+        home_dir: /home/zorro/
+        PYTHONPATH: |
+          /home/zorro/project/pycharm/Industry_Index_PE
+          /home/zorro/project/pycharm/rlops:
+          /home/zorro/project/pycharm/mlops:
+          /home/zorro/project/pycharm/tools:
+          ${PYTHONPATH}
+    tags:
+      - linux
+      - x86_64
+
+  # macOS cluster
+  - name: mac
+    head_address: 192.168.5.2:32546
+    dashboard: http://192.168.5.2:8265
+    prefer: true
+    weight: 1.2
+    runtime_env:
+      conda: k8s
+      working_dir: .
+      excludes:
+        - '*.pkl'
+        - '*.db'
+        - '*.csv'
+        - '*.log'
+      env_vars:
+        home_dir: /Users/zorro/
+        PYTHONPATH: |
+          /Users/zorro/project/pycharm/Industry_Index_PE:
+          /Users/zorro/project/pycharm/rlops:
+          /Users/zorro/project/pycharm/mlops:
+          /Users/zorro/project/pycharm/tools:
+          ${PYTHONPATH}
+    tags:
+      - macos
+      - arm64

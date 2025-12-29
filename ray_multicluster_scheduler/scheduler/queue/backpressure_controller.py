@@ -66,8 +66,8 @@ class BackpressureController:
             self.backpressure_active = max_utilization > self.threshold
 
             if self.backpressure_active:
-                logger.warning(f"Backpressure activated: cluster utilization CPU={cpu_utilization:.2f}, "
-                              f"Memory={memory_utilization:.2f} exceeds threshold {self.threshold}")
+                logger.warning(f"Backpressure activated: cluster utilization CPU={cpu_utilization:.2%}, "
+                              f"Memory={memory_utilization:.2%} exceeds threshold {self.threshold}")
             else:
                 logger.debug(f"Cluster utilization CPU={cpu_utilization:.2f}, Memory={memory_utilization:.2f} "
                             f"below threshold {self.threshold}, backpressure inactive")

@@ -7,6 +7,7 @@ from ray.job_submission import JobSubmissionClient
 from ray_multicluster_scheduler.common.model.job_description import JobDescription
 from ray_multicluster_scheduler.common.logging import get_logger
 from ray_multicluster_scheduler.app.client_api.unified_scheduler import get_unified_scheduler
+from ray_multicluster_scheduler.scheduler.lifecycle.task_lifecycle_manager import TaskLifecycleManager
 
 logger = get_logger(__name__)
 
@@ -19,7 +20,7 @@ _initialization_attempted = False
 _task_results = {}
 
 
-def initialize_scheduler(task_lifecycle_manager: Any):
+def initialize_scheduler(task_lifecycle_manager: TaskLifecycleManager):
     """Initialize the scheduler with a task lifecycle manager."""
     global _task_lifecycle_manager
     _task_lifecycle_manager = task_lifecycle_manager
@@ -41,10 +42,12 @@ def _ensure_scheduler_initialized():
     # 标记已尝试初始化
     _initialization_attempted = True
 
-    # 惰性初始化：使用默认配置初始化调度器
-    logger.info("Lazy initializing scheduler with default configuration...")
+    # 惰性初始化：使用全局配置文件路径初始化调度器
+    from ray_multicluster_scheduler.app.client_api.unified_scheduler import UnifiedScheduler
+    config_file_path = UnifiedScheduler._config_file_path
+    logger.info(f"Lazy initializing scheduler with config file: {config_file_path or 'default'}")
     from ray_multicluster_scheduler.app.client_api.unified_scheduler import initialize_scheduler_environment
-    task_lifecycle_manager = initialize_scheduler_environment()
+    task_lifecycle_manager = initialize_scheduler_environment(config_file_path=config_file_path)
     initialize_scheduler(task_lifecycle_manager)
 
 
@@ -170,20 +173,23 @@ def stop_job(job_id: str, cluster_name: Optional[str] = None) -> bool:
     _ensure_scheduler_initialized()
     scheduler = get_unified_scheduler()
     # 获取Job客户端并停止作业
-    if scheduler.task_lifecycle_manager.connection_manager.job_client_pool:
-        if cluster_name:
-            job_client = scheduler.task_lifecycle_manager.connection_manager.job_client_pool.get_client(cluster_name)
+    # 使用按需初始化的job client pool
+    if cluster_name:
+        try:
+            job_client = scheduler.task_lifecycle_manager.connection_manager.get_job_client(cluster_name)
             if job_client:
                 job_client.stop_job(job_id)
                 return True
-        else:
-            # 尝试在所有集群中查找并停止作业
-            for cluster_name in scheduler.task_lifecycle_manager.connection_manager.list_registered_clusters():
-                job_client = scheduler.task_lifecycle_manager.connection_manager.job_client_pool.get_client(cluster_name)
+        except Exception:
+            logger.error(f"Failed to stop job {job_id} on cluster {cluster_name}")
+    else:
+        # 尝试在所有集群中查找并停止作业
+        for cluster_name in scheduler.task_lifecycle_manager.connection_manager.list_registered_clusters():
+            try:
+                job_client = scheduler.task_lifecycle_manager.connection_manager.get_job_client(cluster_name)
                 if job_client:
-                    try:
-                        job_client.stop_job(job_id)
-                        return True
-                    except Exception:
-                        continue
+                    job_client.stop_job(job_id)
+                    return True
+            except Exception:
+                continue
     return False

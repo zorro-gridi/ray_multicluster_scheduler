@@ -48,7 +48,8 @@ def main():
     cluster_registry = ClusterRegistry(metadata_manager, health_checker)
 
     # 4. Connection management
-    connection_manager = ConnectionLifecycleManager(client_pool)
+    # 初始化连接管理器，不初始化job_client_pool（仅在提交作业时按需初始化）
+    connection_manager = ConnectionLifecycleManager(client_pool, initialize_job_client_pool_on_init=False)
 
     # Register clusters with connection manager
     for cluster_config in cluster_configs:
@@ -57,19 +58,18 @@ def main():
         except Exception as e:
             logger.error(f"Failed to register cluster {cluster_config.name}: {e}")
 
+    # 10. Cluster Monitor
+    # Extract config file path or use None to let ClusterMonitor use default
+    cluster_monitor = ClusterMonitor()  # Will use default config or attempt to load from standard locations
+
     # 5. Policy engine
-    cluster_metadata_dict = {cluster.name: cluster for cluster in cluster_configs}
-    policy_engine = PolicyEngine(cluster_metadata_dict)
+    policy_engine = PolicyEngine(cluster_monitor)
 
     # 6. Circuit breaker manager
     circuit_breaker_manager = ClusterCircuitBreakerManager()
 
     # 7. Dispatcher
     dispatcher = Dispatcher(connection_manager, circuit_breaker_manager)
-
-    # 10. Cluster Monitor
-    # Extract config file path or use None to let ClusterMonitor use default
-    cluster_monitor = ClusterMonitor()  # Will use default config or attempt to load from standard locations
 
     # 10. Task lifecycle manager
     task_lifecycle_manager = TaskLifecycleManager(

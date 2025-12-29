@@ -34,8 +34,9 @@ class RayClientPool:
             ray_client_address = f"ray://{cluster_metadata.head_address}"
 
             # 检查是否已经存在连接
-            if cluster_metadata.name in self.connections:
-                logger.info(f"Cluster {cluster_metadata.name} already in pool, updating configuration")
+            cluster_already_exists = cluster_metadata.name in self.connections
+            if cluster_already_exists:
+                logger.debug(f"Cluster {cluster_metadata.name} already in pool, updating configuration")
 
             # 存储连接信息，但不立即建立连接
             # 实际的连接将在需要时建立
@@ -54,7 +55,9 @@ class RayClientPool:
                 'success_count': 0,
                 'failure_count': 0
             }
-            logger.info(f"Added cluster {cluster_metadata.name} to connection pool")
+
+            if not cluster_already_exists:
+                logger.info(f"Added cluster {cluster_metadata.name} to connection pool")
         except Exception as e:
             logger.error(f"Failed to add cluster {cluster_metadata.name} to connection pool: {e}")
             raise ClusterConnectionError(f"Could not connect to cluster {cluster_metadata.name}: {e}")

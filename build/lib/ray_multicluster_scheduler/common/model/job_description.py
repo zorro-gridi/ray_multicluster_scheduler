@@ -23,9 +23,9 @@ class JobDescription:
 
     def __post_init__(self):
         if not self.job_id:
-            self.job_id = f"job_{uuid.uuid4().hex[:8]}"
+            self.job_id = f"job_{uuid.uuid4().hex[:20]}"
         if not self.submission_id:
-            self.submission_id = f"sub_{uuid.uuid4().hex[:8]}"
+            self.submission_id = f"sub_{uuid.uuid4().hex[:20]}"
         if self.tags is None:
             self.tags = []
 
@@ -39,5 +39,6 @@ class JobDescription:
             resource_requirements=self.resource_requirements or {},
             tags=self.tags,
             preferred_cluster=self.preferred_cluster,
-            is_actor=False
+            is_actor=False,
+            runtime_env=self.runtime_env  # 添加这行来传递runtime_env
         )

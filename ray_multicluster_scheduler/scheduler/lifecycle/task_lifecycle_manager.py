@@ -24,10 +24,11 @@ class TaskLifecycleManager:
 
     def __init__(self, cluster_monitor: ClusterMonitor):
         self.cluster_monitor = cluster_monitor
-        self.policy_engine = PolicyEngine()
+        self.policy_engine = PolicyEngine(cluster_monitor=cluster_monitor)
         # 初始化client_pool和connection_manager
+        # 不在初始化时创建job_client_pool，只在需要时按需创建
         self.client_pool = cluster_monitor.client_pool
-        self.connection_manager = ConnectionLifecycleManager(self.client_pool)
+        self.connection_manager = ConnectionLifecycleManager(self.client_pool, initialize_job_client_pool_on_init=False)
         self.dispatcher = Dispatcher(self.connection_manager)
         self.task_queue = TaskQueue(max_size=100)
         # Initialize backpressure controller
@@ -131,17 +132,13 @@ class TaskLifecycleManager:
             if not self._initialized:
                 self._initialize_connections()
 
-            # Get cluster snapshots (refresh happens in ClusterMonitor as needed)
-            cluster_info = self.cluster_monitor.get_all_cluster_info()
-            cluster_snapshots = {name: info['snapshot'] for name, info in cluster_info.items()
-                              if info['snapshot'] is not None}
-
             # Update policy engine with current cluster metadata
+            cluster_info = self.cluster_monitor.get_all_cluster_info()
             cluster_metadata = {name: info['metadata'] for name, info in cluster_info.items()}
             self.policy_engine.update_cluster_metadata(cluster_metadata)
 
-            # Make scheduling decision
-            decision = self.policy_engine.schedule(task_desc, cluster_snapshots)
+            # Make scheduling decision - policy engine will fetch latest snapshots directly
+            decision = self.policy_engine.schedule(task_desc)
 
             if decision and decision.cluster_name:
                 logger.info(f"任务 {task_desc.task_id} 调度到集群 {decision.cluster_name}")
@@ -185,17 +182,13 @@ class TaskLifecycleManager:
             if not self._initialized:
                 self._initialize_connections()
 
-            # Get cluster snapshots (refresh happens in ClusterMonitor as needed)
-            cluster_info = self.cluster_monitor.get_all_cluster_info()
-            cluster_snapshots = {name: info['snapshot'] for name, info in cluster_info.items()
-                              if info['snapshot'] is not None}
-
             # Update policy engine with current cluster metadata
+            cluster_info = self.cluster_monitor.get_all_cluster_info()
             cluster_metadata = {name: info['metadata'] for name, info in cluster_info.items()}
             self.policy_engine.update_cluster_metadata(cluster_metadata)
 
-            # Make scheduling decision for job
-            decision = self.policy_engine.schedule_job(job_desc, cluster_snapshots)
+            # Make scheduling decision for job - policy engine will fetch latest snapshots directly
+            decision = self.policy_engine.schedule_job(job_desc)
 
             if decision and decision.cluster_name:
                 logger.info(f"作业 {job_desc.job_id} 调度到集群 {decision.cluster_name}")
@@ -333,17 +326,13 @@ class TaskLifecycleManager:
             if not self._initialized:
                 self._initialize_connections()
 
-            # Get cluster snapshots (refresh happens in ClusterMonitor as needed)
-            cluster_info = self.cluster_monitor.get_all_cluster_info()
-            cluster_snapshots = {name: info['snapshot'] for name, info in cluster_info.items()
-                              if info['snapshot'] is not None}
-
             # Update policy engine with current cluster metadata
+            cluster_info = self.cluster_monitor.get_all_cluster_info()
             cluster_metadata = {name: info['metadata'] for name, info in cluster_info.items()}
             self.policy_engine.update_cluster_metadata(cluster_metadata)
 
-            # Make scheduling decision
-            decision = self.policy_engine.schedule(task_desc, cluster_snapshots)
+            # Make scheduling decision - policy engine will fetch latest snapshots directly
+            decision = self.policy_engine.schedule(task_desc)
 
             if decision and decision.cluster_name:
                 logger.info(f"任务 {task_desc.task_id} 调度到集群 {decision.cluster_name}")
@@ -386,10 +375,31 @@ class TaskLifecycleManager:
                 if not self._initialized:
                     self._initialize_connections()
 
-                # Get cluster snapshots
-                cluster_info = self.cluster_monitor.get_all_cluster_info()
-                cluster_snapshots = {name: info['snapshot'] for name, info in cluster_info.items()
-                                  if info['snapshot'] is not None}
+                # Check if there are queued tasks or jobs that need resource evaluation
+                cluster_queue_names = self.task_queue.get_cluster_queue_names()
+                cluster_job_queue_names = self.task_queue.get_cluster_job_queue_names()
+                has_queued_tasks = len(self.queued_tasks) > 0
+                has_queued_jobs = len(self.queued_jobs) > 0
+                has_cluster_specific_tasks = len(cluster_queue_names) > 0
+                has_cluster_specific_jobs = len(cluster_job_queue_names) > 0
+                has_global_tasks = len(self.task_queue.global_queue) > 0
+                has_global_jobs = len(self.task_queue.global_job_queue) > 0
+
+                # Get cluster snapshots based on queue status (SPEC-3 requirement)
+                # When queues are empty, get snapshots less frequently
+                # When queues are not empty, get snapshots more frequently (every 15 seconds)
+                if (has_queued_tasks or has_queued_jobs or
+                    has_cluster_specific_tasks or has_cluster_specific_jobs or
+                    has_global_tasks or has_global_jobs):
+                    # When queues are not empty, get snapshots every 15 seconds for re-evaluation
+                    cluster_info = self.cluster_monitor.get_all_cluster_info()
+                    cluster_snapshots = {name: info['snapshot'] for name, info in cluster_info.items()
+                                      if info['snapshot'] is not None}
+                else:
+                    # When queues are empty, get snapshots normally
+                    cluster_info = self.cluster_monitor.get_all_cluster_info()
+                    cluster_snapshots = {name: info['snapshot'] for name, info in cluster_info.items()
+                                      if info['snapshot'] is not None}
 
                 # Check backpressure status
                 backpressure_active = self.backpressure_controller.should_apply_backpressure(cluster_snapshots)
@@ -401,12 +411,21 @@ class TaskLifecycleManager:
                     time.sleep(backoff_time)
                     continue  # Skip processing tasks and re-evaluate after backoff
 
-                # Periodically re-evaluate queued tasks and jobs (every 30 seconds to reduce pressure)
+                # Re-evaluate queued tasks and jobs when there are queued items
+                # According to SPEC-3: when queue is not empty, update snapshots every 15 seconds
                 current_time = time.time()
-                if current_time - last_re_evaluation > 30.0:
-                    self._re_evaluate_queued_tasks(cluster_snapshots, cluster_info)
-                    self._re_evaluate_queued_jobs(cluster_snapshots, cluster_info)
-                    last_re_evaluation = current_time
+                # When there are queued tasks or jobs, re-evaluate every 15 seconds
+                if has_queued_tasks or has_queued_jobs:
+                    if current_time - last_re_evaluation > 15.0:  # Every 15 seconds when queues not empty
+                        self._re_evaluate_queued_tasks(cluster_snapshots, cluster_info)
+                        self._re_evaluate_queued_jobs(cluster_snapshots, cluster_info)
+                        last_re_evaluation = current_time
+                else:
+                    # When queues are empty, re-evaluate less frequently
+                    if current_time - last_re_evaluation > 30.0:
+                        self._re_evaluate_queued_tasks(cluster_snapshots, cluster_info)
+                        self._re_evaluate_queued_jobs(cluster_snapshots, cluster_info)
+                        last_re_evaluation = current_time
 
                 # Try to get a task from cluster-specific queues first, then from global queue
                 task_desc = None
@@ -456,8 +475,8 @@ class TaskLifecycleManager:
                         task_desc = job_desc
 
                 if not task_desc:
-                    # No tasks or jobs in any queue, sleep briefly
-                    time.sleep(0.1)
+                    # No tasks or jobs in any queue, sleep for 15 seconds as per SPEC-2
+                    time.sleep(15.0)
                     continue
 
                 # Process the task or job, passing the source cluster information
@@ -496,8 +515,8 @@ class TaskLifecycleManager:
 
                 for task_desc in self.queued_tasks:
                     try:
-                        # Make a new scheduling decision
-                        decision = self.policy_engine.schedule(task_desc, cluster_snapshots)
+                        # Make a new scheduling decision - policy engine will fetch latest snapshots directly
+                        decision = self.policy_engine.schedule(task_desc)
 
                         if decision and decision.cluster_name:
                             # Found a suitable cluster, process this task immediately
@@ -553,8 +572,8 @@ class TaskLifecycleManager:
 
                 for job_desc in self.queued_jobs:
                     try:
-                        # Make a new scheduling decision for job
-                        decision = self.policy_engine.schedule_job(job_desc, cluster_snapshots)
+                        # Make a new scheduling decision for job - policy engine will fetch latest snapshots directly
+                        decision = self.policy_engine.schedule_job(job_desc)
 
                         if decision and decision.cluster_name:
                             # Found a suitable cluster, process this job immediately
@@ -664,7 +683,8 @@ class TaskLifecycleManager:
                 return
 
             # 如果任务来自全局队列，按照规则2：需要经过policy调度策略评估，决策目标调度集群
-            decision = self.policy_engine.schedule(task_desc, cluster_snapshots)
+            # Policy engine will fetch latest snapshots directly
+            decision = self.policy_engine.schedule(task_desc)
 
             if decision and decision.cluster_name:
                 logger.info(f"任务 {task_desc.task_id} 调度到集群 {decision.cluster_name}")
@@ -791,7 +811,8 @@ class TaskLifecycleManager:
                 return
 
             # 如果作业来自全局队列，需要经过policy调度策略评估，决策目标调度集群
-            decision = self.policy_engine.schedule_job(job_desc, cluster_snapshots)
+            # Policy engine will fetch latest snapshots directly
+            decision = self.policy_engine.schedule_job(job_desc)
 
             if decision and decision.cluster_name:
                 logger.info(f"作业 {job_desc.job_id} 调度到集群 {decision.cluster_name}")

@@ -7,6 +7,7 @@ import ray
 from ray.job_submission import JobSubmissionClient
 from ray_multicluster_scheduler.common.model import TaskDescription
 from ray_multicluster_scheduler.common.logging import get_logger
+from ray_multicluster_scheduler.scheduler.lifecycle.task_lifecycle_manager import TaskLifecycleManager
 
 logger = get_logger(__name__)
 
@@ -19,7 +20,7 @@ _initialization_attempted = False
 _task_results = {}
 
 
-def initialize_scheduler(task_lifecycle_manager: Any):
+def initialize_scheduler(task_lifecycle_manager: TaskLifecycleManager):
     """Initialize the scheduler with a task lifecycle manager."""
     global _task_lifecycle_manager
     _task_lifecycle_manager = task_lifecycle_manager
@@ -41,10 +42,12 @@ def _ensure_scheduler_initialized():
     # 标记已尝试初始化
     _initialization_attempted = True
 
-    # 惰性初始化：使用默认配置初始化调度器
-    logger.info("Lazy initializing scheduler with default configuration...")
+    # 惰性初始化：使用全局配置文件路径初始化调度器
+    from ray_multicluster_scheduler.app.client_api.unified_scheduler import UnifiedScheduler
+    config_file_path = UnifiedScheduler._config_file_path
+    logger.info(f"Lazy initializing scheduler with config file: {config_file_path or 'default'}")
     from ray_multicluster_scheduler.app.client_api.unified_scheduler import initialize_scheduler_environment
-    task_lifecycle_manager = initialize_scheduler_environment()
+    task_lifecycle_manager = initialize_scheduler_environment(config_file_path=config_file_path)
     initialize_scheduler(task_lifecycle_manager)
 
 

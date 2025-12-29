@@ -10,7 +10,7 @@ from typing import Dict, List, Optional, Any
 from ray_multicluster_scheduler.common.model import ClusterMetadata, ResourceSnapshot, ClusterHealth
 from ray_multicluster_scheduler.common.logging import get_logger
 from ray_multicluster_scheduler.common.exception import ClusterConnectionError
-from ray_multicluster_scheduler.scheduler.monitor.resource_statistics import get_cluster_level_stats
+from ray_multicluster_scheduler.scheduler.monitor.prometheus_client import get_cluster_resource_snapshot, get_cluster_health_status
 from ray_multicluster_scheduler.scheduler.connection.ray_client_pool import RayClientPool
 from ray_multicluster_scheduler.scheduler.cluster.cluster_manager import ClusterManager
 
@@ -70,9 +70,9 @@ class HealthChecker:
             # 基础评分 = 可用CPU * 集群权重
             base_score = cpu_free * weight
 
-            # 内存资源加成 = 可用内存(GB) * 0.1 * 集群权重
-            memory_available_gb = mem_free / 1024.0  # Convert MB to GB
-            memory_bonus = memory_available_gb * 0.1 * weight
+            # 内存资源加成 = 可用内存(GiB) * 0.1 * 集群权重
+            memory_available_gib = mem_free / 1024.0  # Convert MB to GiB
+            memory_bonus = memory_available_gib * 0.1 * weight
 
             # GPU 资源加成（由于ResourceSnapshot不提供GPU信息，暂时设为0）
             gpu_bonus = gpu_free * 5  # GPU资源更宝贵
@@ -88,8 +88,8 @@ class HealthChecker:
 
         # 记录详细的资源信息
         logger.info(f"集群 [{cluster.name}] 资源状态: "
-                   f"CPU={cpu_free:.2f}/{cpu_total:.2f} ({cpu_utilization:.1%} 已使用), "
-                   f"内存={mem_free:.2f}/{mem_total:.2f}MB ({mem_utilization:.1%} 已使用), "
+                   f"CPU={cpu_free:.2f}/{cpu_total:.2f} ({cpu_utilization:.2%} 已使用), "
+                   f"内存={mem_free/1024.0:.2f}/{mem_total/1024.0:.2f}GiB ({mem_utilization:.2%} 已使用), "
                    f"GPU={gpu_free}/{gpu_total}, "
                    f"节点数={resource_snapshot.node_count}, "
                    f"评分={score:.1f}")
@@ -105,70 +105,38 @@ class HealthChecker:
             try:
                 logger.info(f"Starting health check for cluster {cluster.name}")
 
-                # Establish connection for this specific cluster using the client pool
-                success = self.client_pool.establish_ray_connection(cluster.name)
-                if not success:
-                    logger.error(f"Failed to connect to cluster {cluster.name}")
+                # Check cluster health status using Prometheus
+                cluster_available = get_cluster_health_status(cluster.name)
+                if not cluster_available:
+                    logger.warning(f"Cluster {cluster.name} is not available according to Prometheus")
                     continue
 
-                logger.info(f"Successfully connected to cluster {cluster.name}")
+                # Get resource snapshot from Prometheus
+                snapshot = get_cluster_resource_snapshot(cluster.name)
 
-                # Get node count
-                nodes = ray.nodes()
-                node_count = len(nodes)
-                logger.debug(f"Found {node_count} nodes for cluster {cluster.name}")
+                # Calculate score for the cluster
+                score = self._calculate_score(cluster, snapshot)
 
-                # Try to get detailed resource statistics using the new interface
-                try:
-                    # Use the new resource statistics interface to get real metrics
-                    # Pass the client pool to ensure connection management is handled properly
-                    logger.debug(f"Calling get_cluster_level_stats for cluster {cluster.name}")
-                    cluster_stats = get_cluster_level_stats(cluster_name=cluster.name, ray_client_pool=self.client_pool)
+                logger.info(f"Created snapshot for {cluster.name} with stats: CPU usage={snapshot.cluster_cpu_usage_percent}%, Mem usage={snapshot.cluster_mem_usage_percent}%, Score={score:.1f}")
 
-                    logger.debug(f"Received cluster_stats for {cluster.name}: {cluster_stats}")
+            except Exception as e:
+                logger.warning(f"Failed to get detailed stats for {cluster.name}, using defaults: {e}")
+                import traceback
+                traceback.print_exc()
+                # Fallback to default values if detailed stats fail
+                snapshot = ResourceSnapshot(
+                    cluster_name=cluster.name,
+                    cluster_cpu_usage_percent=0.0,
+                    cluster_mem_usage_percent=0.0,
+                    cluster_cpu_used_cores=0.0,
+                    cluster_cpu_total_cores=0.0,
+                    cluster_mem_used_mb=0.0,
+                    cluster_mem_total_mb=0.0,
+                    node_count=0,  # 使用0作为默认节点数，因为不再使用ray.nodes()
+                    timestamp=time.time(),
+                    node_stats=None
+                )
 
-                    # Check if cluster_stats is None before accessing its attributes
-                    if cluster_stats is None:
-                        logger.warning(f"cluster_stats is None for {cluster.name}, using default values")
-                        raise ValueError("cluster_stats is None")
-
-                    # Create resource snapshot with actual metrics from the new interface
-                    snapshot = ResourceSnapshot(
-                        cluster_name=cluster.name,
-                        cluster_cpu_usage_percent=cluster_stats.get('cluster_cpu_usage_percent', 0.0),
-                        cluster_mem_usage_percent=cluster_stats.get('cluster_mem_usage_percent', 0.0),
-                        cluster_cpu_used_cores=cluster_stats.get('cluster_cpu_used_cores', 0.0),
-                        cluster_cpu_total_cores=cluster_stats.get('cluster_cpu_total_cores', 0.0),
-                        cluster_mem_used_mb=cluster_stats.get('cluster_mem_used_mb', 0.0),
-                        cluster_mem_total_mb=cluster_stats.get('cluster_mem_total_mb', 0.0),
-                        node_count=node_count,
-                        timestamp=time.time(),
-                        node_stats=None
-                    )
-
-                    # Calculate score for the cluster
-                    score = self._calculate_score(cluster, snapshot)
-
-                    logger.info(f"Created snapshot for {cluster.name} with stats: CPU usage={snapshot.cluster_cpu_usage_percent}%, Mem usage={snapshot.cluster_mem_usage_percent}%, Score={score:.1f}")
-                except Exception as e:
-                    logger.warning(f"Failed to get detailed stats for {cluster.name}, using defaults: {e}")
-                    import traceback
-                    traceback.print_exc()
-                    # Fallback to default values if detailed stats fail
-                    snapshot = ResourceSnapshot(
-                        cluster_name=cluster.name,
-                        cluster_cpu_usage_percent=0.0,
-                        cluster_mem_usage_percent=0.0,
-                        cluster_cpu_used_cores=0.0,
-                        cluster_cpu_total_cores=0.0,
-                        cluster_mem_used_mb=0.0,
-                        cluster_mem_total_mb=0.0,
-                        node_count=node_count,
-                        timestamp=time.time(),
-                        node_stats=None
-                    )
-
-                snapshots[cluster.name] = snapshot
                 logger.debug(f"Health check for {cluster.name}: {snapshot}")
             except Exception as e:
                 logger.error(f"Health check failed for cluster {cluster.name}: {e}")
@@ -178,131 +146,16 @@ class HealthChecker:
                 if self.client_pool:
                     self.client_pool.mark_cluster_disconnected(cluster.name)
 
+            # NOTE: 用户更新，不要修改
+            snapshots[cluster.name] = snapshot
         return snapshots
-
-    def _create_initial_snapshots(self):
-        """Create initial snapshots for all clusters during initialization."""
-        logger.info("Creating initial snapshots for all clusters")
-        for cluster in self.cluster_metadata:
-            try:
-                logger.info(f"Creating initial snapshot for cluster {cluster.name}")
-
-                # Establish connection for this specific cluster using the client pool
-                success = self.client_pool.establish_ray_connection(cluster.name)
-                if not success:
-                    logger.error(f"Failed to connect to cluster {cluster.name} for initial snapshot")
-                    continue
-
-                logger.info(f"Successfully connected to cluster {cluster.name} for initial snapshot")
-
-                # Get node count
-                nodes = ray.nodes()
-                node_count = len(nodes)
-                logger.debug(f"Found {node_count} nodes for cluster {cluster.name}")
-
-                # Try to get detailed resource statistics using the new interface
-                try:
-                    # Use the new resource statistics interface to get real metrics
-                    # Pass the client pool to ensure connection management is handled properly
-                    logger.debug(f"Calling get_cluster_level_stats for initial snapshot of cluster {cluster.name}")
-                    cluster_stats = get_cluster_level_stats(cluster_name=cluster.name, ray_client_pool=self.client_pool)
-
-                    logger.debug(f"Received cluster_stats for {cluster.name} (initial): {cluster_stats}")
-
-                    # Check if cluster_stats is None before accessing its attributes
-                    if cluster_stats is None:
-                        logger.warning(f"cluster_stats is None for {cluster.name}, using default values")
-                        raise ValueError("cluster_stats is None")
-
-                    # Create resource snapshot with actual metrics from the new interface
-                    snapshot = ResourceSnapshot(
-                        cluster_name=cluster.name,
-                        cluster_cpu_usage_percent=cluster_stats.get('cluster_cpu_usage_percent', 0.0),
-                        cluster_mem_usage_percent=cluster_stats.get('cluster_mem_usage_percent', 0.0),
-                        cluster_cpu_used_cores=cluster_stats.get('cluster_cpu_used_cores', 0.0),
-                        cluster_cpu_total_cores=cluster_stats.get('cluster_cpu_total_cores', 0.0),
-                        cluster_mem_used_mb=cluster_stats.get('cluster_mem_used_mb', 0.0),
-                        cluster_mem_total_mb=cluster_stats.get('cluster_mem_total_mb', 0.0),
-                        node_count=node_count,
-                        timestamp=time.time(),
-                        node_stats=None
-                    )
-                    logger.info(f"Created initial snapshot for {cluster.name} with stats: CPU usage={snapshot.cluster_cpu_usage_percent}%, Mem usage={snapshot.cluster_mem_usage_percent}%")
-                except Exception as e:
-                    logger.warning(f"Failed to get detailed stats for {cluster.name} (initial), using defaults: {e}")
-                    import traceback
-                    traceback.print_exc()
-                    # Fallback to default values if detailed stats fail
-                    snapshot = ResourceSnapshot(
-                        cluster_name=cluster.name,
-                        cluster_cpu_usage_percent=0.0,
-                        cluster_mem_usage_percent=0.0,
-                        cluster_cpu_used_cores=0.0,
-                        cluster_cpu_total_cores=0.0,
-                        cluster_mem_used_mb=0.0,
-                        cluster_mem_total_mb=0.0,
-                        node_count=node_count,
-                        timestamp=time.time(),
-                        node_stats=None
-                    )
-            except Exception as e:
-                logger.error(f"Initial snapshot creation failed for cluster {cluster.name}: {e}")
-                import traceback
-                traceback.print_exc()
-                # Mark the client as disconnected but keep the entry
-                if self.client_pool:
-                    self.client_pool.mark_cluster_disconnected(cluster.name)
 
     def update_cluster_manager_health(self, cluster_manager: ClusterManager):
         """Update cluster manager's health status with current health check results."""
-        logger.info("Updating cluster manager health status with current health check results")
-
-        # Perform health check to get latest snapshots
-        snapshots = self.check_health()
-
-        # Update cluster manager's health status for each cluster
-        for cluster_name, snapshot in snapshots.items():
-            if cluster_name in cluster_manager.clusters:
-                # Get or create health status for the cluster
-                health = cluster_manager.health_status.get(cluster_name)
-                if health is None:
-                    health = ClusterHealth()
-                    cluster_manager.health_status[cluster_name] = health
-
-                # Calculate score for the cluster based on the snapshot
-                cluster_metadata = None
-                for metadata in self.cluster_metadata:
-                    if metadata.name == cluster_name:
-                        cluster_metadata = metadata
-                        break
-
-                if cluster_metadata:
-                    score = self._calculate_score(cluster_metadata, snapshot)
-                else:
-                    score = 0.0  # Default score if metadata not found
-
-                # Update health status with new information
-                resources = {
-                    "available": {
-                        "CPU": snapshot.cluster_cpu_total_cores - snapshot.cluster_cpu_used_cores,
-                        "memory": (snapshot.cluster_mem_total_mb - snapshot.cluster_mem_used_mb) * 1024 * 1024  # Convert MB to bytes to match old format
-                    },
-                    "total": {
-                        "CPU": snapshot.cluster_cpu_total_cores,
-                        "memory": snapshot.cluster_mem_total_mb * 1024 * 1024  # Convert MB to bytes to match old format
-                    },
-                    "cpu_free": snapshot.cluster_cpu_total_cores - snapshot.cluster_cpu_used_cores,
-                    "cpu_total": snapshot.cluster_cpu_total_cores,
-                    "gpu_free": 0,  # ResourceSnapshot doesn't provide GPU info
-                    "gpu_total": 0,  # ResourceSnapshot doesn't provide GPU info
-                    "cpu_utilization": snapshot.cluster_cpu_usage_percent / 100.0 if snapshot.cluster_cpu_total_cores > 0 else 0,
-                    "mem_utilization": snapshot.cluster_mem_usage_percent / 100.0 if snapshot.cluster_mem_total_mb > 0 else 0,
-                    "node_count": snapshot.node_count
-                }
-
-                health.update(score, resources, True)
-
-                logger.info(f"Updated health status for cluster {cluster_name}: score={score:.1f}, cpu_free={resources['cpu_free']:.2f}")
+        # This method is maintained for compatibility but the simplified approach
+        # relies on direct snapshot fetching by PolicyEngine
+        logger.info("Health checker compatibility method called - health updates now handled directly by PolicyEngine")
+        return {}  # Return empty dict as health updates are now handled by PolicyEngine directly
 
     def reconnect_cluster(self, cluster_name: str):
         """Attempt to reconnect to a cluster."""
@@ -366,8 +219,11 @@ class HealthChecker:
                 total_memory_mb = total_memory_bytes / (1024*1024) if total_memory_bytes > 0 else 0
                 used_memory_mb = total_memory_mb - (available_memory_bytes / (1024*1024)) if total_memory_bytes > 0 else 0
 
-                logger.info(f"  CPU: {cpu_free:.2f}/{cpu_total:.2f} ({cpu_utilization:.1%} 已使用)")
-                logger.info(f"  内存: {used_memory_mb:.2f}/{total_memory_mb:.2f}MB ({mem_utilization:.1%} 已使用)")
+                logger.info(f"  CPU: {cpu_free:.2f}/{cpu_total:.2f} ({cpu_utilization:.2%} 已使用)")
+                # 转换为GiB显示
+                used_memory_gib = used_memory_mb / 1024.0
+                total_memory_gib = total_memory_mb / 1024.0
+                logger.info(f"  内存: {used_memory_gib:.2f}/{total_memory_gib:.2f}GiB ({mem_utilization:.2%} 已使用)")
                 logger.info(f"  GPU: {gpu_free}/{gpu_total}")
                 logger.info(f"  节点数: {node_count}")
 
@@ -378,7 +234,7 @@ class HealthChecker:
         """检查单个集群健康状态"""
         health = ClusterHealth()
 
-        # 如果提供了ResourceSnapshot，则使用它，否则获取节点数
+        # 如果提供了ResourceSnapshot，则使用它
         if resource_snapshot:
             # 使用传入的ResourceSnapshot数据
             cpu_total = resource_snapshot.cluster_cpu_total_cores
@@ -394,8 +250,8 @@ class HealthChecker:
 
             node_count = resource_snapshot.node_count
         else:
-            # 如果没有ResourceSnapshot，获取节点数
-            node_count = len(ray.nodes())
+            # 如果没有ResourceSnapshot，使用默认值
+            node_count = 0
             # 设置默认值
             cpu_total = 0
             cpu_used = 0
@@ -426,9 +282,9 @@ class HealthChecker:
             # 基础评分 = 可用CPU * 集群权重
             base_score = cpu_free * weight
 
-            # 内存资源加成 = 可用内存(GB) * 0.1 * 集群权重
-            memory_available_gb = mem_free / 1024.0  # Convert MB to GB
-            memory_bonus = memory_available_gb * 0.1 * weight
+            # 内存资源加成 = 可用内存(GiB) * 0.1 * 集群权重
+            memory_available_gib = mem_free / 1024.0  # Convert MB to GiB
+            memory_bonus = memory_available_gib * 0.1 * weight
 
             # GPU 资源加成（由于ResourceSnapshot不提供GPU信息，暂时设为0）
             gpu_bonus = gpu_free * 5  # GPU资源更宝贵
@@ -465,8 +321,8 @@ class HealthChecker:
 
         # 记录详细的资源信息
         logger.info(f"集群 [{cluster.name}] 资源状态: "
-                    f"CPU={cpu_free:.2f}/{cpu_total:.2f} ({cpu_utilization:.1%} 已使用), "
-                    f"内存={mem_free:.2f}/{mem_total:.2f}MB ({mem_utilization:.1%} 已使用), "
+                    f"CPU={cpu_free:.2f}/{cpu_total:.2f} ({cpu_utilization:.2%} 已使用), "
+                    f"内存={mem_free/1024.0:.2f}/{mem_total/1024.0:.2f}GiB ({mem_utilization:.2%} 已使用), "
                     f"GPU={gpu_free}/{gpu_total}, "
                     f"节点数={node_count}, "
                     f"评分={score:.1f}")

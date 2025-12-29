@@ -36,10 +36,10 @@ class WeightedPreferencePolicy:
             mem_used_mb = snapshot.cluster_mem_used_mb
             mem_total_mb = snapshot.cluster_mem_total_mb
             memory_available = mem_total_mb - mem_used_mb
-            memory_available_gb = memory_available / 1024.0  # Convert MB to GB
+            memory_available_gib = memory_available / 1024.0  # Convert MB to GiB
 
             # Combine absolute resource values with weights
-            resource_score = cpu_available + memory_available_gb  # Sum of absolute available resources
+            resource_score = cpu_available + memory_available_gib  # Sum of absolute available resources
 
             # Apply cluster weight
             weighted_score = resource_score * cluster_meta.weight
