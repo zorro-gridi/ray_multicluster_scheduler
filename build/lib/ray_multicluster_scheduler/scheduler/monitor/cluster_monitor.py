@@ -15,7 +15,7 @@ from ray_multicluster_scheduler.scheduler.health.health_checker import HealthChe
 logger = get_logger(__name__)
 
 # Cache timeout in seconds
-CACHE_TIMEOUT = 10.0  # Cache snapshots for 10 seconds to reduce HealthChecker calls
+CACHE_TIMEOUT = 5.0  # Cache snapshots for 10 seconds to reduce HealthChecker calls
 
 
 class ClusterMonitor:
