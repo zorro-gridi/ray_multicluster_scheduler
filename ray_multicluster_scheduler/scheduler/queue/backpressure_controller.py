@@ -13,13 +13,13 @@ logger = get_logger(__name__)
 class BackpressureController:
     """Controls task submission rate based on cluster resource utilization."""
 
-    def __init__(self, threshold: float = 0.8):
+    def __init__(self, threshold: float = 0.7):
         """
         Initialize the backpressure controller.
 
         Args:
             threshold: Resource utilization threshold (0.0-1.0) above which backpressure is applied.
-                      Default is 0.8 (80%).
+                      Default is 0.7 (70%).
         """
         self.threshold = threshold
         self.last_check_time = 0

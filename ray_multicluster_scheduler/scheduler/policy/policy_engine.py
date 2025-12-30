@@ -16,7 +16,7 @@ class PolicyEngine:
     """Engine for evaluating and combining multiple scheduling policies."""
 
     # 定义资源使用率阈值，超过此阈值时任务将进入队列等待
-    RESOURCE_THRESHOLD = 0.8  # 80%
+    RESOURCE_THRESHOLD = 0.7  # 70%
 
     def __init__(self, cluster_monitor: ClusterMonitor):
         if cluster_monitor is None:

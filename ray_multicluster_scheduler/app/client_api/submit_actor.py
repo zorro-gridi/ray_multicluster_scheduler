@@ -69,11 +69,13 @@ def submit_actor(actor_class: Type, args: tuple = (), kwargs: dict = None,
 
     Returns:
         A tuple containing (task_id, result) where task_id is the unique identifier
-        for the submitted actor and result is the actor instance.
+        for the submitted actor and result is either the actor instance (if created immediately)
+        or the task_id (if queued for later creation).
 
     Note:
         This function now supports concurrent actor submissions. Multiple actors can be
         submitted simultaneously without interfering with each other's handles.
+        Actors may be queued if cluster resources are temporarily unavailable.
 
     Raises:
         Exception: If the scheduler is not initialized or actor submission fails
@@ -110,18 +112,24 @@ def submit_actor(actor_class: Type, args: tuple = (), kwargs: dict = None,
         # 注意：已移除runtime_env参数
     )
 
-    # Submit actor to the lifecycle manager and get the future
-    future = _task_lifecycle_manager.submit_task_and_get_future(task_desc)
+    # Submit actor to the lifecycle manager and get the future or task ID
+    result = _task_lifecycle_manager.submit_task_and_get_future(task_desc)
 
-    if future is None:
+    if result is None:
         raise RuntimeError(f"Failed to submit actor {task_desc.task_id}")
 
     logger.info(f"Submitted actor {task_desc.task_id} to scheduler")
 
-    # 对于Actor，future就是actor实例本身，不需要调用ray.get()
-    # 存储任务结果供后续查询
-    _task_results[task_desc.task_id] = future
-    return task_desc.task_id, future
+    # Result could be either a future (for immediate execution) or task ID (for queued tasks)
+    # Store the result for later access
+    _task_results[task_desc.task_id] = result
+
+    # If the result is the task ID, return it as both ID and result
+    if isinstance(result, str) and result == task_desc.task_id:
+        return task_desc.task_id, result
+    else:
+        # If we got a future back, return task ID and the future
+        return task_desc.task_id, result
 
 
 def get_actor_result(actor_id: str) -> Any:
@@ -135,7 +143,11 @@ def get_actor_result(actor_id: str) -> Any:
         The actor instance, or None if actor not found or not completed
     """
     global _task_results
-    return _task_results.get(actor_id)
+    result = _task_results.get(actor_id)
+    # If the actor is queued (result is the actor_id itself), indicate that it's pending
+    if result == actor_id:
+        return f"Actor {actor_id} is queued and waiting for resources"
+    return result
 
 
 def get_actor_status(actor_id: str) -> str:
@@ -146,11 +158,16 @@ def get_actor_status(actor_id: str) -> str:
         actor_id: The ID of the actor to get status for
 
     Returns:
-        The status of the actor (e.g., "SUBMITTED", "RUNNING", "COMPLETED", "FAILED")
+        The status of the actor (e.g., "QUEUED", "SUBMITTED", "RUNNING", "COMPLETED", "FAILED")
     """
     global _task_results
     if actor_id in _task_results:
-        return "COMPLETED"
+        result = _task_results[actor_id]
+        # If the result is the actor_id itself, the actor is queued
+        if result == actor_id:
+            return "QUEUED"
+        else:
+            return "COMPLETED"
     else:
         # 这里应该查询实际的任务状态，目前简化处理
         return "UNKNOWN"

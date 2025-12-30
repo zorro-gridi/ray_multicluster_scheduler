@@ -464,6 +464,23 @@ class TaskQueue:
             else:
                 return len(self.global_queue) == 0
 
+    def is_full(self, cluster_name: str = None) -> bool:
+        """
+        Check if the specified task queue is full.
+        If cluster_name is provided, check that cluster's queue; otherwise check global queue.
+
+        Args:
+            cluster_name: Optional cluster name for cluster-specific check
+
+        Returns:
+            True if the specified queue is full, False otherwise
+        """
+        with self.lock:
+            if cluster_name:
+                return len(self.cluster_queues[cluster_name]) >= self.max_size
+            else:
+                return len(self.global_queue) >= self.max_size
+
     def is_job_empty(self, cluster_name: str = None) -> bool:
         """
         Check if the specified job queue is empty.

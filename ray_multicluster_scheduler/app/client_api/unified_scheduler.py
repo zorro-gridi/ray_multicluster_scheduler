@@ -462,6 +462,15 @@ class UnifiedScheduler:
             logger.error(f"Failed to list clusters: {e}")
             return []
 
+    def cleanup(self):
+        """
+        Clean up resources used by the unified scheduler.
+        """
+        logger.info("Cleaning up unified scheduler resources")
+        # Currently, there are no specific resources to clean up
+        # The task_lifecycle_manager cleanup is handled separately in main
+        pass
+
 
 
 # Global unified scheduler instance

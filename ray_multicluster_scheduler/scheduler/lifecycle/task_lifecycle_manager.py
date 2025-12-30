@@ -32,7 +32,7 @@ class TaskLifecycleManager:
         self.dispatcher = Dispatcher(self.connection_manager)
         self.task_queue = TaskQueue(max_size=100)
         # Initialize backpressure controller
-        self.backpressure_controller = BackpressureController(threshold=0.8)
+        self.backpressure_controller = BackpressureController(threshold=0.7)
         self.running = False
         self.worker_thread = None
         self._initialized = False
@@ -349,7 +349,8 @@ class TaskLifecycleManager:
                     self.task_queue.enqueue(task_desc, task_desc.preferred_cluster)
                 else:
                     self.task_queue.enqueue(task_desc)
-                return None
+                # 返回任务ID而不是None，这样客户端不会因为任务排队而失败
+                return task_desc.task_id
 
         except Exception as e:
             logger.error(f"任务 {task_desc.task_id} 提交失败: {e}")
@@ -363,7 +364,8 @@ class TaskLifecycleManager:
                     self.task_queue.enqueue(task_desc, task_desc.preferred_cluster)
                 else:
                     self.task_queue.enqueue(task_desc)
-            return None
+            # 即使出现异常，也返回任务ID，让客户端知道任务已排队
+            return task_desc.task_id
 
     def _worker_loop(self):
         """Main worker loop that processes tasks and jobs from the queue."""

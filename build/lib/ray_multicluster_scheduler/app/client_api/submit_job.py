@@ -156,7 +156,32 @@ def get_job_status(job_id: str, cluster_name: Optional[str] = None) -> Any:
     """
     _ensure_scheduler_initialized()
     scheduler = get_unified_scheduler()
-    return scheduler.task_lifecycle_manager.cluster_monitor.cluster_manager.health_status.get(job_id)
+
+    # If cluster_name is not provided, we need to determine which cluster the job was submitted to
+    if not cluster_name:
+        # For now, try all registered clusters to find the job
+        for registered_cluster_name in scheduler.task_lifecycle_manager.connection_manager.list_registered_clusters():
+            try:
+                job_client = scheduler.task_lifecycle_manager.connection_manager.get_job_client(registered_cluster_name)
+                if job_client:
+                    try:
+                        # Try to get the job status from this cluster
+                        status = job_client.get_job_status(job_id)
+                        return status
+                    except Exception:
+                        # Job might not exist on this cluster, continue to next cluster
+                        continue
+            except Exception:
+                continue
+        # If job was not found on any cluster, return UNKNOWN
+        return "UNKNOWN"
+    else:
+        # If cluster_name is provided, get the job status from that specific cluster
+        job_client = scheduler.task_lifecycle_manager.connection_manager.get_job_client(cluster_name)
+        if not job_client:
+            raise ValueError(f"Cannot get JobSubmissionClient for cluster: {cluster_name}")
+
+        return job_client.get_job_status(job_id)
 
 
 def stop_job(job_id: str, cluster_name: Optional[str] = None) -> bool:
@@ -179,17 +204,89 @@ def stop_job(job_id: str, cluster_name: Optional[str] = None) -> bool:
             job_client = scheduler.task_lifecycle_manager.connection_manager.get_job_client(cluster_name)
             if job_client:
                 job_client.stop_job(job_id)
+                logger.info(f"Successfully stopped job {job_id} on cluster {cluster_name}")
                 return True
-        except Exception:
-            logger.error(f"Failed to stop job {job_id} on cluster {cluster_name}")
+        except Exception as e:
+            logger.error(f"Failed to stop job {job_id} on cluster {cluster_name}: {e}")
     else:
         # 尝试在所有集群中查找并停止作业
-        for cluster_name in scheduler.task_lifecycle_manager.connection_manager.list_registered_clusters():
+        for registered_cluster_name in scheduler.task_lifecycle_manager.connection_manager.list_registered_clusters():
             try:
-                job_client = scheduler.task_lifecycle_manager.connection_manager.get_job_client(cluster_name)
+                job_client = scheduler.task_lifecycle_manager.connection_manager.get_job_client(registered_cluster_name)
                 if job_client:
                     job_client.stop_job(job_id)
+                    logger.info(f"Successfully stopped job {job_id} on cluster {registered_cluster_name}")
                     return True
-            except Exception:
+            except Exception as e:
+                logger.debug(f"Failed to stop job {job_id} on cluster {registered_cluster_name}: {e}")
                 continue
     return False
+
+def wait_for_all_jobs(job_ids: list, check_interval: int = 5, timeout: Optional[int] = None):
+    """
+    轮询等待所有jobs完成
+
+    Args:
+        job_ids: 要等待的job ID列表
+        check_interval: 检查间隔（秒）
+        timeout: 超时时间（秒），None表示无超时
+
+    Returns:
+        bool: 所有job执行成功时返回True
+
+    Raises:
+        RuntimeError: 任一job执行失败时抛出异常，报告失败的job ID
+    """
+    _ensure_scheduler_initialized()
+    import time
+    from datetime import datetime, timedelta
+
+    print(f"\n开始轮询 {len(job_ids)} 个job的状态，检查间隔: {check_interval}秒")
+
+    completed_jobs = set()
+    total_jobs = len(job_ids)
+    start_time = datetime.now()
+
+    while len(completed_jobs) < total_jobs:
+        # 检查是否超时
+        if timeout is not None:
+            elapsed = (datetime.now() - start_time).total_seconds()
+            if elapsed >= timeout:
+                remaining_jobs = [job_id for job_id in job_ids if job_id not in completed_jobs]
+                raise TimeoutError(f"等待jobs完成超时，仍有 {len(remaining_jobs)} 个job未完成: {remaining_jobs}")
+
+        still_running = []
+
+        for job_id in job_ids:
+            if job_id in completed_jobs:
+                continue  # 已完成的job跳过
+
+            try:
+                status = get_job_status(job_id)
+                print(f"Job {job_id} 状态: {status}")
+
+                if status == "SUCCEEDED":  # 成功完成
+                    completed_jobs.add(job_id)
+                    print(f"Job {job_id} 已成功完成")
+                elif status in ["FAILED", "STOPPED"]:  # 失败或被停止
+                    print(f"Job {job_id} 执行失败，状态: {status}")
+                    raise RuntimeError(f"Job {job_id} 执行失败，状态: {status}")
+                else:  # 运行中或其他状态
+                    still_running.append((job_id, status))
+
+            except Exception as e:
+                print(f"获取job {job_id} 状态失败: {e}")
+                raise RuntimeError(f"无法获取job {job_id} 的状态: {e}")
+
+        if still_running:
+            print(f"仍有 {len(still_running)} 个job在运行，继续等待...")
+            print(f"  运行中的job: {[job_id for job_id, _ in still_running]}")
+        else:
+            print("所有job都已完成！")
+
+        if len(completed_jobs) < total_jobs:
+            print(f"等待 {check_interval} 秒后再次检查...")
+            time.sleep(check_interval)
+
+    print(f"\n所有 {total_jobs} 个job都已成功完成！")
+    return True

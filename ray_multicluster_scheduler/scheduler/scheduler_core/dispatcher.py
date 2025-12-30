@@ -43,7 +43,14 @@ class Dispatcher:
             if task_desc.is_actor:
                 # Submit as actor
                 actor_class = task_desc.func_or_class
-                actor = actor_class.options(name=task_desc.name).remote(*task_desc.args, **task_desc.kwargs)
+                # Check if actor_class is a class or function
+                if hasattr(actor_class, 'options'):
+                    # It's already a Ray remote class
+                    actor = actor_class.options(name=task_desc.name).remote(*task_desc.args, **task_desc.kwargs)
+                else:
+                    # It's a regular class/function, need to make it remote first
+                    remote_class = ray.remote(actor_class)
+                    actor = remote_class.options(name=task_desc.name).remote(*task_desc.args, **task_desc.kwargs)
                 return actor
             else:
                 # Submit as remote function

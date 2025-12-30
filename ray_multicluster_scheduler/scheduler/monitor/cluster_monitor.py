@@ -159,7 +159,7 @@ class ClusterMonitor:
                 gpu_utilization = 0
 
                 # 检查是否任一资源使用率未超过阈值
-                if cpu_utilization <= 0.8 and gpu_utilization <= 0.8 and mem_utilization <= 0.8:
+                if cpu_utilization <= 0.7 and gpu_utilization <= 0.7 and mem_utilization <= 0.7:
                     all_clusters_over_threshold = False
                     break
 

@@ -10,7 +10,18 @@ from typing import Dict, List, Optional, Any
 from ray_multicluster_scheduler.common.model import ClusterMetadata, ResourceSnapshot, ClusterHealth
 from ray_multicluster_scheduler.common.logging import get_logger
 from ray_multicluster_scheduler.common.exception import ClusterConnectionError
-from ray_multicluster_scheduler.scheduler.monitor.prometheus_client import get_cluster_resource_snapshot, get_cluster_health_status
+# Delayed import to avoid circular imports
+get_cluster_resource_snapshot = None
+get_cluster_health_status = None
+
+
+def _import_prometheus_client():
+    """Import prometheus client functions to avoid circular imports."""
+    global get_cluster_resource_snapshot, get_cluster_health_status
+    if get_cluster_resource_snapshot is None or get_cluster_health_status is None:
+        from ray_multicluster_scheduler.scheduler.monitor.prometheus_client import get_cluster_resource_snapshot as _get_cluster_resource_snapshot, get_cluster_health_status as _get_cluster_health_status
+        get_cluster_resource_snapshot = _get_cluster_resource_snapshot
+        get_cluster_health_status = _get_cluster_health_status
 from ray_multicluster_scheduler.scheduler.connection.ray_client_pool import RayClientPool
 from ray_multicluster_scheduler.scheduler.cluster.cluster_manager import ClusterManager
 
@@ -104,6 +115,9 @@ class HealthChecker:
         for cluster in self.cluster_metadata:
             try:
                 logger.info(f"Starting health check for cluster {cluster.name}")
+
+                # Import prometheus client functions to avoid circular imports
+                _import_prometheus_client()
 
                 # Check cluster health status using Prometheus
                 cluster_available = get_cluster_health_status(cluster.name)
