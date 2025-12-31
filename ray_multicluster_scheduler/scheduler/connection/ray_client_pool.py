@@ -6,6 +6,7 @@ from ray_multicluster_scheduler.common.model import ClusterMetadata
 from ray_multicluster_scheduler.common.logging import get_logger
 from ray_multicluster_scheduler.common.exception import ClusterConnectionError
 from ray_multicluster_scheduler.control_plane.config import ConfigManager
+import ray.exceptions
 
 logger = get_logger(__name__)
 
@@ -86,6 +87,15 @@ class RayClientPool:
             return False
 
         try:
+            # 首先检查当前是否已连接到其他集群，如果有则断开
+            if self.current_cluster is not None and self.current_cluster != cluster_name:
+                logger.info(f"Disconnecting from cluster {self.current_cluster} before connecting to {cluster_name}")
+                try:
+                    if ray.is_initialized():
+                        ray.shutdown()
+                except Exception as shutdown_error:
+                    logger.warning(f"Error during ray shutdown: {shutdown_error}")
+
             connection_info = self.connections[cluster_name]
             ray_address = connection_info['address']
 
@@ -123,10 +133,33 @@ class RayClientPool:
                 logger.error(f"Failed to initialize connection to cluster {cluster_name}")
                 return False
 
+        except ray.exceptions.RaySystemError as e:
+            logger.error(f"Ray system error when connecting to cluster {cluster_name}: {e}")
+            # 如果是客户端已经断开的错误，尝试清理连接后重试
+            if "already been disconnected" in str(e) or "reconnect a session that has already been cleaned up" in str(e):
+                logger.info(f"Attempting to clean up and reconnect to cluster {cluster_name}")
+                try:
+                    if ray.is_initialized():
+                        ray.shutdown()
+                except:
+                    pass  # 如果shutdown失败，继续尝试
+                # 更新连接状态
+                self.mark_cluster_disconnected(cluster_name)
+            return False
         except Exception as e:
             logger.error(f"Failed to establish connection to cluster {cluster_name}: {e}")
             import traceback
             traceback.print_exc()
+            # 检查是否是连接相关的特定错误
+            if "already been disconnected" in str(e) or "reconnect a session that has already been cleaned up" in str(e):
+                logger.info(f"Cleaning up connection state for cluster {cluster_name}")
+                try:
+                    if ray.is_initialized():
+                        ray.shutdown()
+                except:
+                    pass  # 如果shutdown失败，继续尝试
+                # 更新连接状态
+                self.mark_cluster_disconnected(cluster_name)
             return False
 
     def ensure_cluster_connection(self, cluster_name: str) -> bool:
@@ -140,11 +173,17 @@ class RayClientPool:
             # 已经连接到正确的集群，检查连接是否仍然有效
             connection_info = self.connections[cluster_name]
             if connection_info.get('connected', False):
-                # 更新最后使用时间
-                connection_info['last_used'] = time.time()
-                if cluster_name in self.cluster_states:
-                    self.cluster_states[cluster_name]['last_used'] = time.time()
-                return True
+                # 检查Ray是否仍处于初始化状态
+                if ray.is_initialized():
+                    # 更新最后使用时间
+                    connection_info['last_used'] = time.time()
+                    if cluster_name in self.cluster_states:
+                        self.cluster_states[cluster_name]['last_used'] = time.time()
+                    return True
+                else:
+                    # Ray连接已断开，标记为未连接
+                    logger.warning(f"Ray connection to cluster {cluster_name} was initialized but Ray is not active")
+                    connection_info['connected'] = False
 
         # 需要连接到指定集群
         return self.establish_ray_connection(cluster_name)
@@ -194,9 +233,21 @@ class RayClientPool:
                 logger.info(f"Connection to cluster {cluster_name} timed out, marking as invalid")
                 return False
 
-            # 对于连接池，我们假设连接是有效的，除非明确知道它已断开
-            # 实际验证将在任务提交时进行
-            return connection_info.get('connected', False)
+            # 快速检查：如果连接标记为未连接，直接返回False
+            is_connected = connection_info.get('connected', False)
+            if not is_connected:
+                return False
+
+            # 只有当前集群才需要检查Ray是否初始化，避免不必要的ray.is_initialized()调用
+            is_ray_active = (cluster_name == self.current_cluster) and ray.is_initialized()
+
+            # 如果连接标记为已连接，但Ray未初始化，则连接无效
+            if is_connected and not is_ray_active:
+                logger.debug(f"Connection to cluster {cluster_name} marked as connected but Ray is not active")
+                connection_info['connected'] = False
+                return False
+
+            return is_connected and is_ray_active
         except Exception as e:
             logger.warning(f"Connection to cluster {cluster_name} is invalid: {e}")
             return False
