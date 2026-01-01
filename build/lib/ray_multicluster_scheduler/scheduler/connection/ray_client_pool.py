@@ -1,11 +1,13 @@
 import ray
 import time
 import logging
+import threading
 from typing import Dict, Optional, Any, Callable
 from ray_multicluster_scheduler.common.model import ClusterMetadata
 from ray_multicluster_scheduler.common.logging import get_logger
 from ray_multicluster_scheduler.common.exception import ClusterConnectionError
 from ray_multicluster_scheduler.control_plane.config import ConfigManager
+import ray.exceptions
 
 logger = get_logger(__name__)
 
@@ -25,6 +27,13 @@ class RayClientPool:
         self.config_manager = config_manager
         # 跟踪当前连接的集群
         self.current_cluster = None
+
+        # 添加主线程检查
+        self.main_thread_id = threading.get_ident()
+        self._main_thread_only = True  # 标记是否只允许在主线程中执行连接操作
+
+        # 添加线程锁保护连接操作
+        self._lock = threading.RLock()
 
     def add_cluster(self, cluster_metadata: ClusterMetadata):
         """Add a cluster to the connection pool."""
@@ -85,7 +94,22 @@ class RayClientPool:
             logger.error(f"Cluster {cluster_name} not found in connection pool")
             return False
 
+        # 检查当前线程是否为主线程
+        current_thread_id = threading.get_ident()
+        if current_thread_id != self.main_thread_id:
+            logger.warning(f"Ray connection being established from non-main thread. Main thread ID: {self.main_thread_id}, Current thread ID: {current_thread_id}")
+            logger.warning("SIGTERM handler will not be set in non-main thread")
+
         try:
+            # 首先检查当前是否已连接到其他集群，如果有则断开
+            if self.current_cluster is not None and self.current_cluster != cluster_name:
+                logger.info(f"Disconnecting from cluster {self.current_cluster} before connecting to {cluster_name}")
+                try:
+                    if ray.is_initialized():
+                        ray.shutdown()
+                except Exception as shutdown_error:
+                    logger.warning(f"Error during ray shutdown: {shutdown_error}")
+
             connection_info = self.connections[cluster_name]
             ray_address = connection_info['address']
 
@@ -121,33 +145,66 @@ class RayClientPool:
                 return True
             else:
                 logger.error(f"Failed to initialize connection to cluster {cluster_name}")
+                self.current_cluster = None  # 重置current_cluster
                 return False
 
+        except ray.exceptions.RaySystemError as e:
+            logger.error(f"Ray system error when connecting to cluster {cluster_name}: {e}")
+            # 如果是客户端已经断开的错误，尝试清理连接后重试
+            if "already been disconnected" in str(e) or "reconnect a session that has already been cleaned up" in str(e):
+                logger.info(f"Attempting to clean up and reconnect to cluster {cluster_name}")
+                try:
+                    if ray.is_initialized():
+                        ray.shutdown()
+                except:
+                    pass  # 如果shutdown失败，继续尝试
+                # 更新连接状态
+                self.mark_cluster_disconnected(cluster_name)
+            self.current_cluster = None  # 重置current_cluster
+            return False
         except Exception as e:
             logger.error(f"Failed to establish connection to cluster {cluster_name}: {e}")
             import traceback
             traceback.print_exc()
+            # 检查是否是连接相关的特定错误
+            if "already been disconnected" in str(e) or "reconnect a session that has already been cleaned up" in str(e):
+                logger.info(f"Cleaning up connection state for cluster {cluster_name}")
+                try:
+                    if ray.is_initialized():
+                        ray.shutdown()
+                except:
+                    pass  # 如果shutdown失败，继续尝试
+                # 更新连接状态
+                self.mark_cluster_disconnected(cluster_name)
+            self.current_cluster = None  # 重置current_cluster
             return False
 
     def ensure_cluster_connection(self, cluster_name: str) -> bool:
         """Ensure we are connected to the specified cluster, connecting if necessary."""
-        if cluster_name not in self.connections:
-            logger.error(f"Cluster {cluster_name} not found in connection pool")
-            return False
+        with self._lock:  # 使用锁保护整个操作
+            if cluster_name not in self.connections:
+                logger.error(f"Cluster {cluster_name} not found in connection pool")
+                return False
 
-        # 检查是否已连接到目标集群
-        if self.current_cluster == cluster_name:
-            # 已经连接到正确的集群，检查连接是否仍然有效
-            connection_info = self.connections[cluster_name]
-            if connection_info.get('connected', False):
-                # 更新最后使用时间
-                connection_info['last_used'] = time.time()
-                if cluster_name in self.cluster_states:
-                    self.cluster_states[cluster_name]['last_used'] = time.time()
-                return True
+            # 检查是否已连接到目标集群
+            if self.current_cluster == cluster_name:
+                # 已经连接到正确的集群，检查连接是否仍然有效
+                connection_info = self.connections[cluster_name]
+                if connection_info.get('connected', False):
+                    # 验证连接健康状态
+                    if self._verify_connection_health(cluster_name):
+                        # 更新最后使用时间
+                        connection_info['last_used'] = time.time()
+                        if cluster_name in self.cluster_states:
+                            self.cluster_states[cluster_name]['last_used'] = time.time()
+                        return True
+                    else:
+                        # 连接不健康，标记为未连接
+                        logger.warning(f"Connection to cluster {cluster_name} is unhealthy, will reconnect")
+                        connection_info['connected'] = False
 
-        # 需要连接到指定集群
-        return self.establish_ray_connection(cluster_name)
+            # 需要连接到指定集群
+            return self.establish_ray_connection(cluster_name)
 
 
     def release_connection(self, cluster_name: str):
@@ -160,7 +217,13 @@ class RayClientPool:
         """Remove a cluster from the connection pool."""
         if cluster_name in self.connections:
             try:
-                # 不要在这里断开连接，让系统自然管理
+                # 如果当前连接的是此集群，断开连接
+                if self.current_cluster == cluster_name:
+                    if ray.is_initialized():
+                        ray.shutdown()
+                        logger.info(f"Disconnected from cluster {cluster_name} during removal")
+                        self.current_cluster = None
+
                 del self.connections[cluster_name]
                 if cluster_name in self.active_connections:
                     del self.active_connections[cluster_name]
@@ -188,15 +251,30 @@ class RayClientPool:
             if cluster_name not in self.connections or not self.active_connections.get(cluster_name, False):
                 return False
 
-            # 检查连接是否超时
             connection_info = self.connections[cluster_name]
+
+            # 检查连接是否超时
             if time.time() - connection_info['last_used'] > self.connection_timeout:
                 logger.info(f"Connection to cluster {cluster_name} timed out, marking as invalid")
                 return False
 
-            # 对于连接池，我们假设连接是有效的，除非明确知道它已断开
-            # 实际验证将在任务提交时进行
-            return connection_info.get('connected', False)
+            # 快速检查：如果连接标记为未连接，直接返回False
+            is_connected = connection_info.get('connected', False)
+            if not is_connected:
+                return False
+
+            # 只有当前集群才需要检查Ray是否初始化
+            if cluster_name == self.current_cluster:
+                if not ray.is_initialized():
+                    logger.debug(f"Connection to cluster {cluster_name} marked as connected but Ray is not active")
+                    connection_info['connected'] = False
+                    return False
+                # 验证连接健康状态
+                return self._verify_connection_health(cluster_name)
+            else:
+                # 非当前集群的连接标记为无效
+                return False
+
         except Exception as e:
             logger.warning(f"Connection to cluster {cluster_name} is invalid: {e}")
             return False
@@ -241,3 +319,22 @@ class RayClientPool:
         for cluster_name in expired_clusters:
             logger.info(f"Cleaning up expired connection for cluster {cluster_name}")
             self.mark_cluster_disconnected(cluster_name)
+
+    def _verify_connection_health(self, cluster_name: str) -> bool:
+        """验证连接是否真正有效"""
+        try:
+            if cluster_name == self.current_cluster and ray.is_initialized():
+                # 尝试执行简单操作验证连接
+                ray.get_runtime_context()
+                return True
+        except Exception as e:
+            logger.warning(f"Connection health check failed for {cluster_name}: {e}")
+            self.mark_cluster_disconnected(cluster_name)
+        return False
+
+    def _reset_current_cluster_if_invalid(self):
+        """如果当前集群连接无效，重置current_cluster"""
+        if self.current_cluster:
+            if not self._verify_connection_health(self.current_cluster):
+                logger.warning(f"Current cluster {self.current_cluster} is invalid, resetting")
+                self.current_cluster = None

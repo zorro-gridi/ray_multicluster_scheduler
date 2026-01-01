@@ -40,5 +40,6 @@ class JobDescription:
             tags=self.tags,
             preferred_cluster=self.preferred_cluster,
             is_actor=False,
+            is_top_level_task=True,  # Job作为顶级任务，受40秒限制
             runtime_env=self.runtime_env  # 添加这行来传递runtime_env
         )

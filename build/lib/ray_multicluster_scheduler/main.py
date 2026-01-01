@@ -4,6 +4,8 @@ Main entry point for the ray multicluster scheduler.
 
 import time
 import ray
+import signal
+import sys
 from ray_multicluster_scheduler.control_plane.config import ConfigManager
 from ray_multicluster_scheduler.common.model import ClusterMetadata
 from ray_multicluster_scheduler.common.logging import configure_logging, get_logger
@@ -25,12 +27,56 @@ from ray_multicluster_scheduler.app.client_api.unified_scheduler import UnifiedS
 
 logger = get_logger(__name__)
 
+# 全局引用，以便在信号处理函数中访问
+scheduler_components = {}
+
+def signal_handler(signum, frame):
+    """处理 SIGTERM 和 SIGINT 信号"""
+    logger.info(f"Received signal {signum}, initiating graceful shutdown...")
+    shutdown_scheduler()
+    sys.exit(0)
+
+def shutdown_scheduler():
+    """执行调度器的优雅关闭"""
+    logger.info("Starting graceful shutdown of scheduler components...")
+
+    # 停止任务生命周期管理器
+    task_lifecycle_manager = scheduler_components.get('task_lifecycle_manager')
+    if task_lifecycle_manager:
+        try:
+            task_lifecycle_manager.stop()
+            logger.info("Task lifecycle manager stopped")
+        except Exception as e:
+            logger.error(f"Error stopping task lifecycle manager: {e}")
+
+    # 清理统一调度器资源
+    unified_scheduler = scheduler_components.get('unified_scheduler')
+    if unified_scheduler:
+        try:
+            unified_scheduler.cleanup()
+            logger.info("Unified scheduler cleaned up")
+        except Exception as e:
+            logger.error(f"Error cleaning up unified scheduler: {e}")
+
+    # 关闭 Ray 连接
+    if ray.is_initialized():
+        try:
+            ray.shutdown()
+            logger.info("Ray connection shut down")
+        except Exception as e:
+            logger.error(f"Error shutting down Ray: {e}")
+
+    logger.info("Scheduler shutdown completed")
 
 def main():
     """Main entry point for the scheduler."""
     # Configure logging
     configure_logging()
     logger.info("Starting Ray Multi-Cluster Scheduler")
+
+    # 设置信号处理器
+    signal.signal(signal.SIGTERM, signal_handler)
+    signal.signal(signal.SIGINT, signal_handler)
 
     # Load configuration
     config_manager = ConfigManager()
@@ -86,6 +132,12 @@ def main():
     unified_scheduler = UnifiedScheduler()
     unified_scheduler.initialize_environment()
 
+    # 保存组件引用以便在信号处理中使用
+    scheduler_components.update({
+        'task_lifecycle_manager': task_lifecycle_manager,
+        'unified_scheduler': unified_scheduler
+    })
+
     # Start the task lifecycle manager
     task_lifecycle_manager.start()
 
@@ -99,11 +151,13 @@ def main():
             logger.info(f"Scheduler stats: {stats}")
     except KeyboardInterrupt:
         logger.info("Received interrupt signal, shutting down...")
+    except Exception as e:
+        logger.error(f"Unexpected error in main loop: {e}")
+        import traceback
+        traceback.print_exc()
     finally:
-        # Stop the task lifecycle manager
-        task_lifecycle_manager.stop()
-        # Clean up unified scheduler resources
-        unified_scheduler.cleanup()
+        # 执行优雅关闭
+        shutdown_scheduler()
         logger.info("Ray Multi-Cluster Scheduler stopped")
 
 

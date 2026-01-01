@@ -2,12 +2,14 @@
 Client API for submitting tasks to the ray multicluster scheduler.
 """
 
+import threading
 from typing import Callable, Any, Dict, List, Optional, Tuple
 import ray
 from ray.job_submission import JobSubmissionClient
 from ray_multicluster_scheduler.common.model import TaskDescription
 from ray_multicluster_scheduler.common.logging import get_logger
 from ray_multicluster_scheduler.scheduler.lifecycle.task_lifecycle_manager import TaskLifecycleManager
+from ray_multicluster_scheduler.common.context_manager import ClusterContextManager
 
 logger = get_logger(__name__)
 
@@ -18,6 +20,16 @@ _initialization_attempted = False
 
 # 存储任务结果的字典
 _task_results = {}
+
+
+def get_current_cluster_context() -> Optional[str]:
+    """获取当前线程的集群上下文"""
+    return ClusterContextManager.get_current_cluster()
+
+
+def set_current_cluster_context(cluster_name: Optional[str]):
+    """设置当前线程的集群上下文"""
+    ClusterContextManager.set_current_cluster(cluster_name)
 
 
 def initialize_scheduler(task_lifecycle_manager: TaskLifecycleManager):
@@ -99,6 +111,19 @@ def submit_task(func: Callable, args: tuple = (), kwargs: dict = None,
     if tags is None:
         tags = []
 
+    # 检查是否有指定的首选集群，如果没有，则尝试从当前集群上下文继承
+    final_preferred_cluster = preferred_cluster
+    if preferred_cluster is None:
+        current_context = get_current_cluster_context()
+        if current_context:
+            final_preferred_cluster = current_context
+        else:
+            # 如果没有在上下文管理器中找到集群，尝试从环境变量获取
+            import os
+            env_cluster = os.environ.get('RAY_MULTICLUSTER_CURRENT_CLUSTER')
+            if env_cluster:
+                final_preferred_cluster = env_cluster
+
     # Create task description
     task_desc = TaskDescription(
         name=name,
@@ -108,7 +133,8 @@ def submit_task(func: Callable, args: tuple = (), kwargs: dict = None,
         resource_requirements=resource_requirements,
         tags=tags,
         is_actor=False,
-        preferred_cluster=preferred_cluster
+        is_top_level_task=False,  # task作为子任务，不受40秒限制
+        preferred_cluster=final_preferred_cluster
         # 注意：已移除runtime_env参数
     )
 

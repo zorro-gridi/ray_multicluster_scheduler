@@ -2,12 +2,15 @@
 Client API for submitting actors to the ray multicluster scheduler.
 """
 
+import time
+import threading
 from typing import Callable, Any, Dict, List, Optional, Tuple, Type
 import ray
 from ray.job_submission import JobSubmissionClient
 from ray_multicluster_scheduler.common.model import TaskDescription
 from ray_multicluster_scheduler.common.logging import get_logger
 from ray_multicluster_scheduler.scheduler.lifecycle.task_lifecycle_manager import TaskLifecycleManager
+from ray_multicluster_scheduler.common.context_manager import ClusterContextManager
 
 logger = get_logger(__name__)
 
@@ -18,6 +21,20 @@ _initialization_attempted = False
 
 # 存储任务结果的字典
 _task_results = {}
+# 用于同步访问_task_results的锁
+_task_results_lock = threading.Lock()
+# 用于通知_task_results更新的条件变量
+_task_results_condition = threading.Condition(_task_results_lock)
+
+
+def get_current_cluster_context() -> Optional[str]:
+    """获取当前线程的集群上下文"""
+    return ClusterContextManager.get_current_cluster()
+
+
+def set_current_cluster_context(cluster_name: Optional[str]):
+    """设置当前线程的集群上下文"""
+    ClusterContextManager.set_current_cluster(cluster_name)
 
 
 def initialize_scheduler(task_lifecycle_manager: TaskLifecycleManager):
@@ -51,12 +68,12 @@ def _ensure_scheduler_initialized():
     initialize_scheduler(task_lifecycle_manager)
 
 
-def submit_actor(actor_class: Type, args: tuple = (), kwargs: dict = None,
-                 resource_requirements: Dict[str, float] = None,
-                 tags: List[str] = None, name: str = "",
-                 preferred_cluster: Optional[str] = None) -> Tuple[str, Any]:
+def submit_actor_async(actor_class: Type, args: tuple = (), kwargs: dict = None,
+                       resource_requirements: Dict[str, float] = None,
+                       tags: List[str] = None, name: str = "",
+                       preferred_cluster: Optional[str] = None) -> Tuple[str, Any]:
     """
-    Submit an actor to the scheduler.
+    Submit an actor to the scheduler (async version - original behavior).
 
     Args:
         actor_class: The actor class to instantiate remotely
@@ -99,6 +116,19 @@ def submit_actor(actor_class: Type, args: tuple = (), kwargs: dict = None,
     if tags is None:
         tags = []
 
+    # 检查是否有指定的首选集群，如果没有，则尝试从当前集群上下文继承
+    final_preferred_cluster = preferred_cluster
+    if preferred_cluster is None:
+        current_context = get_current_cluster_context()
+        if current_context:
+            final_preferred_cluster = current_context
+        else:
+            # 如果没有在上下文管理器中找到集群，尝试从环境变量获取
+            import os
+            env_cluster = os.environ.get('RAY_MULTICLUSTER_CURRENT_CLUSTER')
+            if env_cluster:
+                final_preferred_cluster = env_cluster
+
     # Create actor description
     task_desc = TaskDescription(
         name=name,
@@ -108,7 +138,8 @@ def submit_actor(actor_class: Type, args: tuple = (), kwargs: dict = None,
         resource_requirements=resource_requirements,
         tags=tags,
         is_actor=True,
-        preferred_cluster=preferred_cluster
+        is_top_level_task=False,  # actor作为子任务，不受40秒限制
+        preferred_cluster=final_preferred_cluster
         # 注意：已移除runtime_env参数
     )
 
@@ -122,7 +153,8 @@ def submit_actor(actor_class: Type, args: tuple = (), kwargs: dict = None,
 
     # Result could be either a future (for immediate execution) or task ID (for queued tasks)
     # Store the result for later access
-    _task_results[task_desc.task_id] = result
+    with _task_results_lock:
+        _task_results[task_desc.task_id] = result
 
     # If the result is the task ID, return it as both ID and result
     if isinstance(result, str) and result == task_desc.task_id:
@@ -130,6 +162,109 @@ def submit_actor(actor_class: Type, args: tuple = (), kwargs: dict = None,
     else:
         # If we got a future back, return task ID and the future
         return task_desc.task_id, result
+
+
+def _wait_for_actor_ready(actor_id: str, timeout: int = 300) -> Any:
+    """
+    Wait for an actor to be ready and return its handle.
+
+    Args:
+        actor_id: The actor ID to wait for
+        timeout: Maximum time to wait in seconds
+
+    Returns:
+        The actor handle when ready
+
+    Raises:
+        TimeoutError: If actor doesn't become ready within timeout
+        RuntimeError: If actor fails to start
+    """
+    start_time = time.time()
+
+    with _task_results_condition:
+        while time.time() - start_time < timeout:
+            result = _task_results.get(actor_id)
+
+            # Check if we have an actual actor handle
+            # Ray actors have a _actor_id attribute and are not strings
+            if result and not isinstance(result, str):
+                # Additional check: Ray actors should have remote methods
+                if hasattr(result, '_actor_id') or hasattr(result, 'remote'):
+                    return result
+                # If it's callable and not a string, it's likely an actor
+                elif hasattr(result, '__call__'):
+                    return result
+
+            # Check if actor failed
+            status = get_actor_status(actor_id)
+            if status == "FAILED":
+                raise RuntimeError(f"Actor {actor_id} failed to start")
+
+            # Wait for a notification or timeout
+            remaining_time = timeout - (time.time() - start_time)
+            if remaining_time <= 0:
+                break
+            # 等待条件变量的通知，最多等待剩余时间
+            _task_results_condition.wait(timeout=min(remaining_time, 1.0))  # 每秒检查一次
+
+    raise TimeoutError(f"Actor {actor_id} did not become ready within {timeout} seconds")
+
+
+def submit_actor(actor_class: Type, args: tuple = (), kwargs: dict = None,
+                 resource_requirements: Dict[str, float] = None,
+                 tags: List[str] = None, name: str = "",
+                 preferred_cluster: Optional[str] = None,
+                 timeout: int = 300) -> Tuple[str, Any]:
+    """
+    Submit an actor to the scheduler and wait for it to be ready.
+
+    This version always returns an actual actor handle, never a string.
+    It will wait for the actor to be ready if it's initially queued.
+
+    Args:
+        actor_class: The actor class to instantiate remotely
+        args: Positional arguments for the actor constructor
+        kwargs: Keyword arguments for the actor constructor
+        resource_requirements: Dictionary of resource requirements (e.g., {"CPU": 2, "GPU": 1})
+        tags: List of tags to associate with the actor
+        name: Optional name for the actor
+        preferred_cluster: Optional preferred cluster name for actor execution
+        timeout: Maximum time to wait for actor to be ready (seconds)
+
+    Returns:
+        A tuple containing (task_id, actor_handle) where actor_handle is always
+        the actual Ray actor handle, never a string.
+
+    Note:
+        This function will block until the actor is ready or timeout is reached.
+        For non-blocking behavior, use submit_actor_async().
+
+    Raises:
+        TimeoutError: If actor doesn't become ready within timeout
+        RuntimeError: If actor fails to start or scheduler not initialized
+    """
+    # First, submit the actor asynchronously
+    actor_id, initial_result = submit_actor_async(
+        actor_class=actor_class,
+        args=args,
+        kwargs=kwargs,
+        resource_requirements=resource_requirements,
+        tags=tags,
+        name=name,
+        preferred_cluster=preferred_cluster
+    )
+
+    # Check if we got an actual actor handle immediately
+    if hasattr(initial_result, '__call__') and not isinstance(initial_result, str):
+        # We got the actor handle immediately
+        return actor_id, initial_result
+
+    # Actor is queued or pending, need to wait for it
+    logger.info(f"Actor {actor_id} is queued/pending, waiting for it to be ready...")
+
+    actor_handle = _wait_for_actor_ready(actor_id, timeout)
+
+    return actor_id, actor_handle
 
 
 def get_actor_result(actor_id: str) -> Any:
@@ -143,7 +278,8 @@ def get_actor_result(actor_id: str) -> Any:
         The actor instance, or None if actor not found or not completed
     """
     global _task_results
-    result = _task_results.get(actor_id)
+    with _task_results_lock:
+        result = _task_results.get(actor_id)
     # If the actor is queued (result is the actor_id itself), indicate that it's pending
     if result == actor_id:
         return f"Actor {actor_id} is queued and waiting for resources"
@@ -161,13 +297,14 @@ def get_actor_status(actor_id: str) -> str:
         The status of the actor (e.g., "QUEUED", "SUBMITTED", "RUNNING", "COMPLETED", "FAILED")
     """
     global _task_results
-    if actor_id in _task_results:
-        result = _task_results[actor_id]
-        # If the result is the actor_id itself, the actor is queued
-        if result == actor_id:
-            return "QUEUED"
+    with _task_results_lock:
+        if actor_id in _task_results:
+            result = _task_results[actor_id]
+            # If the result is the actor_id itself, the actor is queued
+            if result == actor_id:
+                return "QUEUED"
+            else:
+                return "COMPLETED"
         else:
-            return "COMPLETED"
-    else:
-        # 这里应该查询实际的任务状态，目前简化处理
-        return "UNKNOWN"
+            # 这里应该查询实际的任务状态，目前简化处理
+            return "UNKNOWN"

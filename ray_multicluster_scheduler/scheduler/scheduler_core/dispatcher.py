@@ -169,16 +169,28 @@ class Dispatcher:
 
     def _prepare_runtime_env_for_cluster_target(self, target_desc: Any, cluster_name: str) -> Optional[Dict]:
         """Prepare runtime environment for any target (task or job) based on target cluster configuration."""
-        # 检查cluster_metadata是否为空
-        if not self.connection_manager.cluster_metadata:
-            logger.error("Connection manager's cluster_metadata is empty")
-            raise ValueError("Connection manager's cluster_metadata is empty, no clusters registered")
 
-        # Get the cluster metadata
+        # 首先尝试从connection_manager获取集群元数据
         cluster_metadata = self.connection_manager.cluster_metadata.get(cluster_name)
+
+        # 如果从connection_manager获取不到，尝试直接从cluster_monitor获取最新的集群信息
         if not cluster_metadata:
-            logger.error(f"No cluster metadata found for cluster {cluster_name}")
-            raise ValueError(f"Cluster {cluster_name} is not registered in the connection manager")
+            logger.warning(f"No cluster metadata found in connection_manager for cluster {cluster_name}, trying to get from cluster monitor")
+            try:
+                from ray_multicluster_scheduler.app.client_api.unified_scheduler import get_unified_scheduler
+                scheduler = get_unified_scheduler()
+                if scheduler and scheduler.task_lifecycle_manager:
+                    cluster_info = scheduler.task_lifecycle_manager.cluster_monitor.get_all_cluster_info()
+                    if cluster_name in cluster_info:
+                        cluster_metadata = cluster_info[cluster_name]['metadata']
+                        logger.info(f"Successfully got cluster metadata for {cluster_name} from cluster monitor")
+            except Exception as e:
+                logger.error(f"Failed to get cluster metadata from cluster monitor: {e}")
+
+        # 检查cluster_metadata是否为空
+        if not cluster_metadata:
+            logger.error(f"Connection manager's cluster_metadata is empty for cluster {cluster_name}")
+            raise ValueError(f"Connection manager's cluster_metadata is empty for cluster {cluster_name}, no clusters registered")
 
         if not hasattr(cluster_metadata, 'runtime_env'):
             logger.warning(f"No runtime_env configuration found for cluster {cluster_name}")

@@ -12,6 +12,7 @@ from ray_multicluster_scheduler.scheduler.monitor.cluster_monitor import Cluster
 from ray_multicluster_scheduler.scheduler.health.health_checker import HealthChecker
 from ray_multicluster_scheduler.common.model import ClusterMetadata
 from ray_multicluster_scheduler.common.model.job_description import JobDescription
+from ray_multicluster_scheduler.common.context_manager import ClusterContextManager
 
 # Configure logging with default INFO level if not already configured
 try:
@@ -324,23 +325,14 @@ class UnifiedScheduler:
         try:
             logger.info(f"Submitting job: {job_id or 'auto-generated'}")
 
-            # 如果没有提供runtime_env，尝试从集群配置中获取默认的runtime_env
+            # 不预先设置runtime_env，让Dispatcher在调度决策后从目标集群获取正确的配置
+            # 这样可以确保作业被调度到目标集群时使用该集群的正确配置
             effective_runtime_env = runtime_env
-            if effective_runtime_env is None and self.task_lifecycle_manager:
-                # 获取集群信息以确定默认runtime_env
-                cluster_info = self.task_lifecycle_manager.cluster_monitor.get_all_cluster_info()
-                # 如果指定了首选集群，使用该集群的runtime_env
-                if preferred_cluster and preferred_cluster in cluster_info:
-                    cluster_metadata = cluster_info[preferred_cluster]['metadata']
-                    if hasattr(cluster_metadata, 'runtime_env'):
-                        effective_runtime_env = cluster_metadata.runtime_env
-                # 否则，如果没有指定首选集群，可以使用第一个可用集群的runtime_env作为默认值
-                elif not preferred_cluster and cluster_info:
-                    # 获取第一个集群的配置作为默认值
-                    first_cluster_name = next(iter(cluster_info))
-                    cluster_metadata = cluster_info[first_cluster_name]['metadata']
-                    if hasattr(cluster_metadata, 'runtime_env'):
-                        effective_runtime_env = cluster_metadata.runtime_env
+            # 如果没有提供runtime_env，将它设置为None，让Dispatcher使用目标集群的配置
+            if effective_runtime_env is None:
+                # 无论是否指定了preferred_cluster，如果没有提供runtime_env，都设置为None
+                # 让Dispatcher在调度决策后获取目标集群的配置
+                effective_runtime_env = None
 
             # Create job description
             job_desc = JobDescription(

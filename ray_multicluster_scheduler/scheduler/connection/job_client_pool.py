@@ -114,13 +114,21 @@ class JobClientPool:
 
     def get_client(self, cluster_name: str) -> Optional[JobSubmissionClient]:
         """Get a JobSubmissionClient for a specific cluster, creating it on demand if needed."""
-        # If client already exists and is active, return it
+        # If client already exists and is active, verify its health first
         if cluster_name in self.clients and self.active_clients.get(cluster_name, False):
-            # 更新最后使用时间
-            self.client_timestamps[cluster_name] = time.time()
-            return self.clients[cluster_name]
+            # 验证连接健康状态
+            if self._verify_job_client_health(cluster_name):
+                # 更新最后使用时间
+                self.client_timestamps[cluster_name] = time.time()
+                return self.clients[cluster_name]
+            else:
+                # 连接不健康，标记为非活跃并删除客户端
+                logger.warning(f"Job client for {cluster_name} is unhealthy, creating new one")
+                self.active_clients[cluster_name] = False
+                if cluster_name in self.clients:
+                    del self.clients[cluster_name]
 
-        # If client doesn't exist, create it on demand using stored metadata
+        # If client doesn't exist or is unhealthy, create it on demand using stored metadata
         if cluster_name in self.cluster_metadata:
             cluster_metadata = self.cluster_metadata[cluster_name]
             job_client = self._create_job_client(cluster_metadata)
@@ -181,3 +189,33 @@ class JobClientPool:
             if cluster_name in self.cluster_metadata:
                 del self.cluster_metadata[cluster_name]
             logger.info(f"Removed cluster {cluster_name} from job client pool")
+
+    def _verify_job_client_health(self, cluster_name: str) -> bool:
+        """验证JobSubmissionClient是否有效"""
+        try:
+            job_client = self.clients.get(cluster_name)
+            if job_client:
+                # 尝试执行简单操作
+                job_client.list_jobs()
+                return True
+        except Exception as e:
+            logger.warning(f"Job client health check failed for {cluster_name}: {e}")
+        return False
+
+    def cleanup_expired_clients(self):
+        """清理过期的客户端连接"""
+        current_time = time.time()
+        expired_clusters = []
+
+        # 检查过期的连接（默认5分钟超时）
+        timeout = 300
+
+        for cluster_name, timestamp in self.client_timestamps.items():
+            if current_time - timestamp > timeout:
+                expired_clusters.append(cluster_name)
+
+        for cluster_name in expired_clusters:
+            logger.info(f"Cleaning up expired job client for cluster {cluster_name}")
+            self.active_clients[cluster_name] = False
+            if cluster_name in self.clients:
+                del self.clients[cluster_name]

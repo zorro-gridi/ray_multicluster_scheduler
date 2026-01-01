@@ -39,6 +39,9 @@ class PolicyEngine:
         # Initialize cluster submission history
         self.cluster_submission_history = ClusterSubmissionHistory()
 
+        # Initialize round-robin counter for fallback cluster selection
+        self._round_robin_counter = 0
+
     def update_cluster_metadata(self, cluster_metadata: Dict[str, ClusterMetadata]):
         """Update cluster metadata for policies that need it."""
         self.tag_policy = TagAffinityPolicy(cluster_metadata)
@@ -116,16 +119,21 @@ class PolicyEngine:
                 mem_utilization = snapshot.cluster_mem_usage_percent / 100.0 if snapshot.cluster_mem_total_mb > 0 else 0
 
                 # 检查集群上次任务提交时间是否超过40秒
-                if not self.cluster_submission_history.is_cluster_available(task_desc.preferred_cluster):
-                    remaining_time = self.cluster_submission_history.get_remaining_wait_time(task_desc.preferred_cluster)
-                    logger.warning(f"首选集群 {task_desc.preferred_cluster} 在40秒内已提交过任务，"
-                                 f"还需等待 {remaining_time:.2f} 秒，任务将进入该集群的待执行队列等待")
-                    # 返回首选集群名称，让任务进入该集群的队列等待
-                    return SchedulingDecision(
-                        task_id=task_desc.task_id,
-                        cluster_name=task_desc.preferred_cluster,
-                        reason=f"首选集群 {task_desc.preferred_cluster} 在40秒内已提交过任务，还需等待 {remaining_time:.2f} 秒，任务进入该集群的待执行队列等待"
-                    )
+                # 根据任务描述中的信息判断是否为顶级任务
+                is_top_level_task = getattr(task_desc, 'is_top_level_task', True)
+                if not self.cluster_submission_history.is_cluster_available_and_record(task_desc.preferred_cluster, is_top_level_task):
+                    if is_top_level_task:  # 只有顶级任务才显示40秒限制警告
+                        remaining_time = self.cluster_submission_history.get_remaining_wait_time(task_desc.preferred_cluster)
+                        logger.warning(f"首选集群 {task_desc.preferred_cluster} 在40秒内已提交过任务，"
+                                     f"还需等待 {remaining_time:.2f} 秒，任务将进入该集群的待执行队列等待")
+                        # 返回首选集群名称，让任务进入该集群的队列等待
+                        return SchedulingDecision(
+                            task_id=task_desc.task_id,
+                            cluster_name=task_desc.preferred_cluster,
+                            reason=f"首选集群 {task_desc.preferred_cluster} 在40秒内已提交过任务，还需等待 {remaining_time:.2f} 秒，任务进入该集群的待执行队列等待"
+                        )
+                    else:  # 子任务不受40秒限制
+                        logger.info(f"子任务，跳过40秒限制检查，任务 {task_desc.task_id} 将调度到首选集群 {task_desc.preferred_cluster}")
                 elif cpu_utilization > self.RESOURCE_THRESHOLD or gpu_utilization > self.RESOURCE_THRESHOLD or mem_utilization > self.RESOURCE_THRESHOLD:
                     logger.warning(f"用户指定的首选集群 {task_desc.preferred_cluster} 资源使用率超过阈值 "
                                  f"(CPU: {cpu_utilization:.2%}, GPU: {gpu_utilization:.2%}, 内存: {mem_utilization:.2%})，任务将进入该集群的待执行队列等待")
@@ -139,8 +147,7 @@ class PolicyEngine:
                     logger.info(f"任务 {task_desc.task_id} 将调度到用户指定的首选集群 [{task_desc.preferred_cluster}]: "
                                f"可用资源 - CPU: {cpu_available}, GPU: {gpu_available}")
 
-                    # 记录集群任务提交时间
-                    self.cluster_submission_history.record_submission(task_desc.preferred_cluster)
+                    # 40秒规则检查和时间记录已在上面的原子操作中完成
 
                     return SchedulingDecision(
                         task_id=task_desc.task_id,
@@ -215,7 +222,8 @@ class PolicyEngine:
         else:
             logger.info(f"任务指定了首选集群 {task_desc.preferred_cluster}，不应用负载均衡策略")
 
-        # Collect decisions from all policies
+        # 在进行策略评估之前，我们需要考虑如何确保任务在集群间均匀分布
+        # 首先，收集所有策略的决策
         policy_decisions = []
 
         for policy in self.policies:
@@ -266,56 +274,127 @@ class PolicyEngine:
                                 best_cluster = cluster_name
 
                     if best_cluster:
-                        # 获取所选集群的资源信息
-                        cluster_info = self.cluster_monitor.get_all_cluster_info()
-                        cluster_data = cluster_info.get(best_cluster)
-                        if cluster_data and cluster_data['snapshot']:
-                            snapshot = cluster_data['snapshot']
-                            # 使用新的资源指标
-                            cpu_available = snapshot.cluster_cpu_total_cores - snapshot.cluster_cpu_used_cores
-                            gpu_available = 0  # GPU指标暂不可用
+                        # 使用原子操作检查并记录40秒规则
+                        is_top_level_task = getattr(task_desc, 'is_top_level_task', True)
+                        if self.cluster_submission_history.is_cluster_available_and_record(best_cluster, is_top_level_task):
+                            # 获取所选集群的资源信息
+                            cluster_info = self.cluster_monitor.get_all_cluster_info()
+                            cluster_data = cluster_info.get(best_cluster)
+                            if cluster_data and cluster_data['snapshot']:
+                                snapshot = cluster_data['snapshot']
+                                # 使用新的资源指标
+                                cpu_available = snapshot.cluster_cpu_total_cores - snapshot.cluster_cpu_used_cores
+                                gpu_available = 0  # GPU指标暂不可用
 
-                            logger.info(f"任务 {task_desc.task_id} 通过负载均衡算法调度到最佳集群 [{best_cluster}]: "
-                                       f"可用资源 - CPU: {cpu_available}, GPU: {gpu_available}")
+                                logger.info(f"任务 {task_desc.task_id} 通过负载均衡算法调度到最佳集群 [{best_cluster}]: "
+                                           f"可用资源 - CPU: {cpu_available}, GPU: {gpu_available}")
 
-                            # 记录集群任务提交时间
-                            self.cluster_submission_history.record_submission(best_cluster)
-
-                            return SchedulingDecision(
-                                task_id=task_desc.task_id,
-                                cluster_name=best_cluster,
-                                reason=f"通过负载均衡算法选择的最佳集群 {best_cluster}，"
-                                       f"可用资源: CPU={cpu_available}, GPU={gpu_available}"
-                            )
+                                return SchedulingDecision(
+                                    task_id=task_desc.task_id,
+                                    cluster_name=best_cluster,
+                                    reason=f"通过负载均衡算法选择的最佳集群 {best_cluster}，"
+                                           f"可用资源: CPU={cpu_available}, GPU={gpu_available}"
+                                )
+                            else:
+                                return SchedulingDecision(
+                                    task_id=task_desc.task_id,
+                                    cluster_name=best_cluster,
+                                    reason=f"通过负载均衡算法选择的最佳集群 {best_cluster}"
+                                )
                         else:
-                            # 记录集群任务提交时间
-                            self.cluster_submission_history.record_submission(best_cluster)
-
-                            return SchedulingDecision(
-                                task_id=task_desc.task_id,
-                                cluster_name=best_cluster,
-                                reason=f"通过负载均衡算法选择的最佳集群 {best_cluster}"
-                            )
+                            # 集群在原子操作检查时发现不可用，重新选择
+                            is_top_level_task = getattr(task_desc, 'is_top_level_task', True)
+                            if is_top_level_task:  # 只有顶级任务才会被拒绝
+                                logger.warning(f"最佳集群 {best_cluster} 在原子检查时发现不可用，任务进入队列")
+                                best_cluster = None
+                            else:  # 子任务不会被40秒限制拒绝
+                                logger.info(f"子任务，跳过40秒限制检查，任务 {task_desc.task_id} 将调度到集群 {best_cluster}")
+                                return SchedulingDecision(
+                                    task_id=task_desc.task_id,
+                                    cluster_name=best_cluster,
+                                    reason=f"子任务直接调度到集群 {best_cluster}"
+                                )
                 except Exception as e:
                     logger.error(f"使用集群监视器选择最佳集群失败: {e}")
                     import traceback
                     traceback.print_exc()
 
             # Fallback to selecting any healthy cluster
-            for cluster_name in filtered_cluster_snapshots.keys():
-                logger.info(f"任务 {task_desc.task_id} 调度到回退集群 {cluster_name}")
+            # 实现轮询机制以确保任务在集群间分布
+            if filtered_cluster_snapshots:
+                # 使用轮询计数器在可用集群间轮询分配任务
+                available_cluster_names = list(filtered_cluster_snapshots.keys())
 
-                # 记录集群任务提交时间
-                self.cluster_submission_history.record_submission(cluster_name)
+                # 尝试轮询选择，使用原子操作确保40秒规则
+                for attempt in range(len(available_cluster_names)):
+                    cluster_idx = (self._round_robin_counter + attempt) % len(available_cluster_names)
+                    selected_cluster = available_cluster_names[cluster_idx]
 
-                return SchedulingDecision(
-                    task_id=task_desc.task_id,
-                    cluster_name=cluster_name,
-                    reason=f"回退选择第一个可用集群 {cluster_name}"
-                )
+                    # 使用原子操作检查并记录
+                    is_top_level_task = getattr(task_desc, 'is_top_level_task', True)
+                    if self.cluster_submission_history.is_cluster_available_and_record(selected_cluster, is_top_level_task):
+                        # 成功选择集群，更新轮询计数器
+                        self._round_robin_counter = (cluster_idx + 1) % len(available_cluster_names)
 
-        logger.info(f"最终调度决策: {final_decision}")
-        return final_decision
+                        logger.info(f"任务 {task_desc.task_id} 调度到回退集群 {selected_cluster}")
+
+                        return SchedulingDecision(
+                            task_id=task_desc.task_id,
+                            cluster_name=selected_cluster,
+                            reason=f"回退选择集群 {selected_cluster} (轮询分配)"
+                        )
+
+                # 如果所有集群都在40秒限制内，顶级任务进入队列，子任务直接选择集群
+                is_top_level_task = getattr(task_desc, 'is_top_level_task', True)
+                if is_top_level_task:
+                    logger.warning(f"所有可用集群都在40秒限制内，任务 {task_desc.task_id} 进入队列等待")
+                    return SchedulingDecision(
+                        task_id=task_desc.task_id,
+                        cluster_name="",
+                        reason="所有可用集群都在40秒限制内，任务进入队列等待"
+                    )
+                else:
+                    # 子任务不受40秒限制，选择第一个可用集群
+                    selected_cluster = available_cluster_names[0]
+                    logger.info(f"子任务 {task_desc.task_id} 直接调度到集群 {selected_cluster}，跳过40秒限制")
+                    return SchedulingDecision(
+                        task_id=task_desc.task_id,
+                        cluster_name=selected_cluster,
+                        reason=f"子任务直接调度到集群 {selected_cluster}"
+                    )
+
+        # 如果策略引擎提供了决策，需要使用原子操作确保40秒规则
+        if final_decision and final_decision.cluster_name:
+            # 使用原子操作检查并记录提交时间
+            is_top_level_task = getattr(task_desc, 'is_top_level_task', True)
+            if self.cluster_submission_history.is_cluster_available_and_record(final_decision.cluster_name, is_top_level_task):
+                logger.info(f"任务 {task_desc.task_id} 通过策略决策调度到集群 {final_decision.cluster_name}")
+                return final_decision
+            else:
+                # 策略推荐的集群在原子检查时发现不可用，只有顶级任务才进入队列
+                is_top_level_task = getattr(task_desc, 'is_top_level_task', True)
+                if is_top_level_task:
+                    logger.warning(f"策略推荐的集群 {final_decision.cluster_name} 在原子检查时发现不可用，任务进入队列")
+                    return SchedulingDecision(
+                        task_id=task_desc.task_id,
+                        cluster_name="",
+                        reason=f"策略推荐的集群 {final_decision.cluster_name} 在40秒限制内"
+                    )
+                else:
+                    # 子任务不受40秒限制，直接调度
+                    logger.info(f"子任务 {task_desc.task_id} 直接调度到集群 {final_decision.cluster_name}，跳过40秒限制")
+                    return SchedulingDecision(
+                        task_id=task_desc.task_id,
+                        cluster_name=final_decision.cluster_name,
+                        reason=f"子任务直接调度到集群 {final_decision.cluster_name}"
+                    )
+
+        logger.info(f"最终调度决策: 无可用集群，任务进入队列")
+        return SchedulingDecision(
+            task_id=task_desc.task_id,
+            cluster_name="",
+            reason="无可用集群，任务进入队列等待"
+        )
 
     def _combine_decisions(
         self, task_desc: TaskDescription, policy_decisions: List[SchedulingDecision],

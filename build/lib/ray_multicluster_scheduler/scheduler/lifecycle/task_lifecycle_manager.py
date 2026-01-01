@@ -13,10 +13,19 @@ from ray_multicluster_scheduler.scheduler.monitor.cluster_monitor import Cluster
 from ray_multicluster_scheduler.scheduler.queue.task_queue import TaskQueue
 from ray_multicluster_scheduler.scheduler.queue.backpressure_controller import BackpressureController
 
-from ray_multicluster_scheduler.common.exception import NoHealthyClusterError, TaskSubmissionError
+from ray_multicluster_scheduler.common.exception import NoHealthyClusterError, TaskSubmissionError, PolicyEvaluationError
 from ray_multicluster_scheduler.common.logging import get_logger
 
 logger = get_logger(__name__)
+
+# 导入 submit_actor 模块的全局变量
+try:
+    from ray_multicluster_scheduler.app.client_api.submit_actor import _task_results, _task_results_lock, _task_results_condition
+except ImportError:
+    # 如果导入失败，创建本地版本
+    _task_results = {}
+    _task_results_lock = threading.Lock()
+    _task_results_condition = threading.Condition(_task_results_lock)
 
 
 class TaskLifecycleManager:
@@ -40,6 +49,8 @@ class TaskLifecycleManager:
         self.queued_tasks: List[TaskDescription] = []
         # Track queued jobs for re-evaluation
         self.queued_jobs: List[JobDescription] = []
+        # Track job submission cluster mapping
+        self.job_cluster_mapping: Dict[str, str] = {}
 
     def _is_duplicate_task_in_tracked_list(self, task_desc: TaskDescription) -> bool:
         """Check if a task with the same content is already in the tracked queued tasks list."""
@@ -79,6 +90,21 @@ class TaskLifecycleManager:
             self.worker_thread.join(timeout=5.0)  # Wait up to 5 seconds for graceful shutdown
             if self.worker_thread.is_alive():
                 logger.warning("Task lifecycle manager worker thread did not stop gracefully")
+
+        # 确保在停止时清理连接
+        try:
+            self.connection_manager.shutdown()
+        except Exception as e:
+            logger.error(f"Error during connection manager shutdown: {e}")
+
+        # 确保Ray连接也关闭
+        try:
+            if ray.is_initialized():
+                ray.shutdown()
+                logger.info("Ray connection shut down during lifecycle manager stop")
+        except Exception as e:
+            logger.error(f"Error during Ray shutdown: {e}")
+
         logger.info("Task lifecycle manager stopped")
 
     def _initialize_connections(self):
@@ -145,9 +171,15 @@ class TaskLifecycleManager:
                 # 实际调度任务到选定的集群
                 future = self.dispatcher.dispatch_task(task_desc, decision.cluster_name)
 
+                # 注意：不再直接等待结果，而是返回future，让调用方处理
                 # 等待任务执行完成并获取结果
-                result = ray.get(future)
-                logger.info(f"任务 {task_desc.task_id} 执行完成，结果: {result}")
+                # 检查Ray连接状态，避免在关闭时获取结果
+                if ray.is_initialized():
+                    result = ray.get(future)
+                    logger.info(f"任务 {task_desc.task_id} 执行完成，结果: {result}")
+                else:
+                    logger.warning(f"Ray连接已关闭，无法获取任务 {task_desc.task_id} 的结果")
+                    return task_desc.task_id
                 return task_desc.task_id
             else:
                 logger.info(f"任务 {task_desc.task_id} 需要排队等待资源释放")
@@ -199,8 +231,37 @@ class TaskLifecycleManager:
                 # 执行路径转换
                 converted_job_desc = self._convert_job_path(job_desc, target_cluster_metadata)
 
-                # 实际调度作业到选定的集群
-                job_id = self.dispatcher.dispatch_job(converted_job_desc, decision.cluster_name)
+                # 如果runtime_env为None，创建一个包含集群上下文的环境
+                if converted_job_desc.runtime_env is None:
+                    converted_job_desc.runtime_env = {
+                        "env_vars": {
+                            "RAY_MULTICLUSTER_CURRENT_CLUSTER": decision.cluster_name
+                        }
+                    }
+                else:
+                    # 如果已经存在env_vars，添加集群上下文
+                    if "env_vars" not in converted_job_desc.runtime_env:
+                        converted_job_desc.runtime_env["env_vars"] = {}
+                    converted_job_desc.runtime_env["env_vars"]["RAY_MULTICLUSTER_CURRENT_CLUSTER"] = decision.cluster_name
+
+                # 设置集群上下文，以便作业内部的submit_task/submit_actor调用可以继承相同的集群
+                from ray_multicluster_scheduler.common.context_manager import ClusterContextManager
+                previous_cluster = ClusterContextManager.get_current_cluster()
+                ClusterContextManager.set_current_cluster(decision.cluster_name)
+                
+                try:
+                    # 实际调度作业到选定的集群
+                    job_id = self.dispatcher.dispatch_job(converted_job_desc, decision.cluster_name)
+                finally:
+                    # 恢复之前的集群上下文
+                    if previous_cluster is not None:
+                        ClusterContextManager.set_current_cluster(previous_cluster)
+                    else:
+                        ClusterContextManager.clear_current_cluster()
+
+                # 记录作业ID到集群的映射关系
+                self.job_cluster_mapping[job_id] = decision.cluster_name
+
                 logger.info(f"作业 {job_desc.job_id} 提交完成，作业ID: {job_id}")
                 return job_id
             else:
@@ -487,10 +548,22 @@ class TaskLifecycleManager:
                 else:
                     self._process_task(task_desc, cluster_snapshots, source_cluster)
 
+                # 根据项目规范，调用接口后需保证最小时间间隔，避免过于频繁的调度尝试
+                # 当队列不为空时，添加短暂延迟以避免高速循环
+                if (self.queued_tasks or self.queued_jobs or
+                    self.task_queue.get_cluster_queue_names() or
+                    self.task_queue.get_cluster_job_queue_names() or
+                    self.task_queue.global_queue or self.task_queue.global_job_queue):
+                    time.sleep(0.1)  # 短暂延迟，避免过度占用CPU
+
             except Exception as e:
                 logger.error(f"任务生命周期工作者循环错误: {e}")
                 import traceback
                 traceback.print_exc()
+                # Check if we should continue running
+                if not self.running:
+                    logger.info("Task lifecycle manager stopped, exiting worker loop")
+                    break
                 time.sleep(1.0)  # Sleep to avoid tight loop on repeated errors
 
     def _re_evaluate_queued_tasks(self, cluster_snapshots: Dict[str, ResourceSnapshot],
@@ -641,6 +714,20 @@ class TaskLifecycleManager:
             # 如果任务来自特定集群队列，直接调度到该集群（符合规则1：指定集群任务排队队列中的task只能进入指定集群执行）
             if source_cluster_queue:
                 logger.info(f"任务 {task_desc.task_id} 来自集群 {source_cluster_queue} 的队列，直接调度到该集群")
+
+                # 检查目标集群连接状态
+                connection_state = self.connection_manager.get_connection_state(source_cluster_queue)
+                if connection_state not in ['connected', 'healthy']:
+                    logger.warning(f"目标集群 {source_cluster_queue} 连接状态异常 ({connection_state})，尝试重新连接")
+                    success = self.connection_manager.ensure_cluster_connection(source_cluster_queue)
+                    if not success:
+                        logger.error(f"无法连接到目标集群 {source_cluster_queue}，任务 {task_desc.task_id} 重新加入队列")
+                        # Task is already in queue, no need to re-add
+                        # Just ensure it's tracked in the queued_tasks list
+                        if not self._is_duplicate_task_in_tracked_list(task_desc):
+                            self.queued_tasks.append(task_desc)  # Track queued tasks
+                        return
+
                 # 检查目标集群是否健康可用
                 if source_cluster_queue not in cluster_snapshots:
                     logger.error(f"目标集群 {source_cluster_queue} 不在线或无法连接，任务 {task_desc.task_id} 重新加入队列")
@@ -678,10 +765,61 @@ class TaskLifecycleManager:
                         self.queued_tasks.append(task_desc)  # Track queued tasks
                     return
 
+                # 检查是否还在运行（避免在关闭时继续执行）
+                if not self.running:
+                    logger.info(f"调度器已停止，跳过任务 {task_desc.task_id} 的执行")
+                    return
+
                 # 直接调度到指定集群
                 future = self.dispatcher.dispatch_task(task_desc, source_cluster_queue)
-                result = ray.get(future)
-                logger.info(f"任务 {task_desc.task_id} 在集群 {source_cluster_queue} 执行完成，结果: {result}")
+
+                # 检查Ray连接状态，避免在关闭时获取结果
+                # 但首先检查任务类型，避免对actor handle调用ray.get()
+                if task_desc.is_actor:
+                    # 对于 actor，future 应该是 actor handle，不需要 ray.get()
+                    logger.info(f"Actor {task_desc.task_id} 已成功创建在集群 {source_cluster_queue}")
+                    # 将 actor handle 存储到结果中
+                    with _task_results_condition:
+                        _task_results[task_desc.task_id] = future
+                        _task_results_condition.notify_all()  # 通知等待的线程
+                else:
+                    # 对于 function，future 应该是 ObjectRef，可以使用 ray.get()
+                    # 但为了安全起见，先检查 future 类型
+                    import ray.util.client.common
+                    if ((hasattr(ray.util.client.common, 'ClientActorHandle') and
+                        isinstance(future, ray.util.client.common.ClientActorHandle)) or
+                        (hasattr(future, '_actor_id') and not isinstance(future, str))):
+                        # 如果 future 实际上是 actor handle（即使 task_desc.is_actor 为 False），也按 actor 处理
+                        logger.info(f"Actor {task_desc.task_id} 已成功创建在集群 {source_cluster_queue} (通过类型检查识别)")
+                        # 将 actor handle 存储到结果中
+                        with _task_results_condition:
+                            _task_results[task_desc.task_id] = future
+                            _task_results_condition.notify_all()  # 通知等待的线程
+                    else:
+                        # 对于 function，future 是 ObjectRef，可以使用 ray.get()
+                        if ray.is_initialized():
+                            try:
+                                # 根据项目规范，获取Ray远程结果前需检查连接状态
+                                connection_state = self.connection_manager.get_connection_state(source_cluster_queue)
+                                if connection_state not in ['connected', 'healthy']:
+                                    logger.warning(f"集群 {source_cluster_queue} 连接状态异常 ({connection_state})，无法获取任务 {task_desc.task_id} 的结果")
+                                    with _task_results_condition:
+                                        _task_results[task_desc.task_id] = future
+                                        _task_results_condition.notify_all()  # 通知等待的线程
+                                else:
+                                    result = ray.get(future)
+                                    logger.info(f"任务 {task_desc.task_id} 在集群 {source_cluster_queue} 执行完成，结果: {result}")
+                            except Exception as e:
+                                logger.error(f"获取任务 {task_desc.task_id} 结果时出错: {e}")
+                                # 即使获取结果失败，也将 future 存储起来
+                                with _task_results_condition:
+                                    _task_results[task_desc.task_id] = future
+                                    _task_results_condition.notify_all()  # 通知等待的线程
+                        else:
+                            logger.warning(f"Ray连接已关闭，无法获取任务 {task_desc.task_id} 的结果")
+                            with _task_results_condition:
+                                _task_results[task_desc.task_id] = future
+                                _task_results_condition.notify_all()  # 通知等待的线程
                 return
 
             # 如果任务来自全局队列，按照规则2：需要经过policy调度策略评估，决策目标调度集群
@@ -690,12 +828,75 @@ class TaskLifecycleManager:
 
             if decision and decision.cluster_name:
                 logger.info(f"任务 {task_desc.task_id} 调度到集群 {decision.cluster_name}")
+
+                # 检查目标集群连接状态
+                connection_state = self.connection_manager.get_connection_state(decision.cluster_name)
+                if connection_state not in ['connected', 'healthy']:
+                    logger.warning(f"目标集群 {decision.cluster_name} 连接状态异常 ({connection_state})，尝试重新连接")
+                    success = self.connection_manager.ensure_cluster_connection(decision.cluster_name)
+                    if not success:
+                        logger.error(f"无法连接到目标集群 {decision.cluster_name}，任务 {task_desc.task_id} 重新加入队列")
+                        # Task is already in queue, no need to re-add
+                        # Just ensure it's tracked in the queued_tasks list
+                        if not self._is_duplicate_task_in_tracked_list(task_desc):
+                            self.queued_tasks.append(task_desc)  # Track queued tasks
+                        return
+
+                # 检查是否还在运行（避免在关闭时继续执行）
+                if not self.running:
+                    logger.info(f"调度器已停止，跳过任务 {task_desc.task_id} 的执行")
+                    return
+
                 # 实际调度任务到选定的集群
                 future = self.dispatcher.dispatch_task(task_desc, decision.cluster_name)
 
-                # 等待任务执行完成并获取结果
-                result = ray.get(future)
-                logger.info(f"任务 {task_desc.task_id} 执行完成，结果: {result}")
+                # 处理任务结果 - 区分 actor 和 function
+                if task_desc.is_actor:
+                    # 对于 actor，future 应该是 actor handle，不需要 ray.get()
+                    logger.info(f"Actor {task_desc.task_id} 已成功创建在集群 {decision.cluster_name}")
+                    # 将 actor handle 存储到结果中
+                    with _task_results_condition:
+                        _task_results[task_desc.task_id] = future
+                        _task_results_condition.notify_all()  # 通知等待的线程
+                else:
+                    # 对于 function，future 应该是 ObjectRef，可以使用 ray.get()
+                    # 但为了安全起见，先检查 future 类型
+                    import ray.util.client.common
+                    if ((hasattr(ray.util.client.common, 'ClientActorHandle') and
+                        isinstance(future, ray.util.client.common.ClientActorHandle)) or
+                        (hasattr(future, '_actor_id') and not isinstance(future, str))):
+                        # 如果 future 实际上是 actor handle（即使 task_desc.is_actor 为 False），也按 actor 处理
+                        logger.info(f"Actor {task_desc.task_id} 已成功创建在集群 {decision.cluster_name} (通过类型检查识别)")
+                        # 将 actor handle 存储到结果中
+                        with _task_results_condition:
+                            _task_results[task_desc.task_id] = future
+                            _task_results_condition.notify_all()  # 通知等待的线程
+                    else:
+                        # 对于 function，future 是 ObjectRef，可以使用 ray.get()
+                        # 检查Ray连接状态，避免在关闭时获取结果
+                        if ray.is_initialized():
+                            try:
+                                # 根据项目规范，获取Ray远程结果前需检查连接状态
+                                connection_state = self.connection_manager.get_connection_state(decision.cluster_name)
+                                if connection_state not in ['connected', 'healthy']:
+                                    logger.warning(f"集群 {decision.cluster_name} 连接状态异常 ({connection_state})，无法获取任务 {task_desc.task_id} 的结果")
+                                    with _task_results_condition:
+                                        _task_results[task_desc.task_id] = future
+                                        _task_results_condition.notify_all()  # 通知等待的线程
+                                else:
+                                    result = ray.get(future)
+                                    logger.info(f"任务 {task_desc.task_id} 执行完成，结果: {result}")
+                            except Exception as e:
+                                logger.error(f"获取任务 {task_desc.task_id} 结果时出错: {e}")
+                                # 即使获取结果失败，也将 future 存储起来
+                                with _task_results_condition:
+                                    _task_results[task_desc.task_id] = future
+                                    _task_results_condition.notify_all()  # 通知等待的线程
+                        else:
+                            logger.warning(f"Ray连接已关闭，无法获取任务 {task_desc.task_id} 的结果")
+                            with _task_results_condition:
+                                _task_results[task_desc.task_id] = future
+                                _task_results_condition.notify_all()  # 通知等待的线程
             else:
                 # If no cluster is available, re-enqueue the task
                 logger.warning(f"没有可用集群处理任务 {task_desc.task_id}，重新加入队列")
@@ -764,6 +965,20 @@ class TaskLifecycleManager:
             # 如果作业来自特定集群队列，直接调度到该集群
             if source_cluster_queue:
                 logger.info(f"作业 {job_desc.job_id} 来自集群 {source_cluster_queue} 的队列，直接调度到该集群")
+
+                # 检查目标集群连接状态
+                connection_state = self.connection_manager.get_connection_state(source_cluster_queue)
+                if connection_state not in ['connected', 'healthy']:
+                    logger.warning(f"目标集群 {source_cluster_queue} 连接状态异常 ({connection_state})，尝试重新连接")
+                    success = self.connection_manager.ensure_cluster_connection(source_cluster_queue)
+                    if not success:
+                        logger.error(f"无法连接到目标集群 {source_cluster_queue}，作业 {job_desc.job_id} 重新加入队列")
+                        # Job is already in queue, no need to re-add
+                        # Just ensure it's tracked in the queued_jobs list
+                        if not self._is_duplicate_job_in_tracked_list(job_desc):
+                            self.queued_jobs.append(job_desc)  # Track queued jobs
+                        return
+
                 # 检查目标集群是否健康可用
                 if source_cluster_queue not in cluster_snapshots:
                     logger.error(f"目标集群 {source_cluster_queue} 不在线或无法连接，作业 {job_desc.job_id} 重新加入队列")
@@ -801,6 +1016,11 @@ class TaskLifecycleManager:
                         self.queued_jobs.append(job_desc)  # Track queued jobs
                     return
 
+                # 检查是否还在运行（避免在关闭时继续执行）
+                if not self.running:
+                    logger.info(f"调度器已停止，跳过作业 {job_desc.job_id} 的执行")
+                    return
+
                 # 获取目标集群的配置，用于路径转换
                 target_cluster_metadata = cluster_metadata[source_cluster_queue]
 
@@ -818,6 +1038,25 @@ class TaskLifecycleManager:
 
             if decision and decision.cluster_name:
                 logger.info(f"作业 {job_desc.job_id} 调度到集群 {decision.cluster_name}")
+
+                # 检查目标集群连接状态
+                connection_state = self.connection_manager.get_connection_state(decision.cluster_name)
+                if connection_state not in ['connected', 'healthy']:
+                    logger.warning(f"目标集群 {decision.cluster_name} 连接状态异常 ({connection_state})，尝试重新连接")
+                    success = self.connection_manager.ensure_cluster_connection(decision.cluster_name)
+                    if not success:
+                        logger.error(f"无法连接到目标集群 {decision.cluster_name}，作业 {job_desc.job_id} 重新加入队列")
+                        # Job is already in queue, no need to re-add
+                        # Just ensure it's tracked in the queued_jobs list
+                        if not self._is_duplicate_job_in_tracked_list(job_desc):
+                            self.queued_jobs.append(job_desc)  # Track queued jobs
+                        return
+
+                # 检查是否还在运行（避免在关闭时继续执行）
+                if not self.running:
+                    logger.info(f"调度器已停止，跳过作业 {job_desc.job_id} 的执行")
+                    return
+
                 # 获取目标集群的配置，用于路径转换
                 target_cluster_metadata = cluster_metadata[decision.cluster_name]
 

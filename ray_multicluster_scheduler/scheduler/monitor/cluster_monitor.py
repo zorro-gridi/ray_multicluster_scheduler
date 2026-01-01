@@ -4,6 +4,7 @@ Cluster monitor that integrates configuration management, metadata management, a
 
 import time
 import os
+import threading
 from typing import Optional, Dict, Any, List
 from ray_multicluster_scheduler.common.model import ResourceSnapshot, ClusterHealth
 from ray_multicluster_scheduler.common.logging import get_logger
@@ -52,6 +53,9 @@ class ClusterMonitor:
         # Initialize client pool
         from ray_multicluster_scheduler.scheduler.connection.ray_client_pool import RayClientPool
         self.client_pool = RayClientPool(self.config_manager)
+
+        # 添加锁以确保线程安全
+        self._cache_lock = threading.RLock()
 
         # Initialize health checker once
         self.health_checker = self._create_health_checker()
@@ -140,35 +144,37 @@ class ClusterMonitor:
         # Check if we have a recent cache
         current_time = time.time()
 
-        # Check if we have cached snapshots and they are still valid
-        if (current_time - self._last_cache_update) < CACHE_TIMEOUT and self._cached_snapshots:
-            # Check if all clusters are over the resource threshold
-            all_clusters_over_threshold = True
+        # Use lock to ensure thread safety when accessing cache
+        with self._cache_lock:
+            # Check if we have cached snapshots and they are still valid
+            if (current_time - self._last_cache_update) < CACHE_TIMEOUT and self._cached_snapshots:
+                # Check if all clusters are over the resource threshold
+                all_clusters_over_threshold = True
 
-            # Check if any cluster has resources available
-            for cluster_name, snapshot in self._cached_snapshots.items():
-                # 使用新的资源指标
-                cpu_used_cores = snapshot.cluster_cpu_used_cores
-                cpu_total_cores = snapshot.cluster_cpu_total_cores
-                cpu_utilization = cpu_used_cores / cpu_total_cores if cpu_total_cores > 0 else 0
+                # Check if any cluster has resources available
+                for cluster_name, snapshot in self._cached_snapshots.items():
+                    # 使用新的资源指标
+                    cpu_used_cores = snapshot.cluster_cpu_used_cores
+                    cpu_total_cores = snapshot.cluster_cpu_total_cores
+                    cpu_utilization = cpu_used_cores / cpu_total_cores if cpu_total_cores > 0 else 0
 
-                # 检查内存使用率
-                mem_utilization = snapshot.cluster_mem_usage_percent / 100.0 if snapshot.cluster_mem_total_mb > 0 else 0
+                    # 检查内存使用率
+                    mem_utilization = snapshot.cluster_mem_usage_percent / 100.0 if snapshot.cluster_mem_total_mb > 0 else 0
 
-                # GPU资源暂时不可用，使用默认值
-                gpu_utilization = 0
+                    # GPU资源暂时不可用，使用默认值
+                    gpu_utilization = 0
 
-                # 检查是否任一资源使用率未超过阈值
-                if cpu_utilization <= 0.7 and gpu_utilization <= 0.7 and mem_utilization <= 0.7:
-                    all_clusters_over_threshold = False
-                    break
+                    # 检查是否任一资源使用率未超过阈值
+                    if cpu_utilization <= 0.7 and gpu_utilization <= 0.7 and mem_utilization <= 0.7:
+                        all_clusters_over_threshold = False
+                        break
 
-            # 如果所有集群都超过阈值（即没有可用资源），则强制刷新资源状态
-            if all_clusters_over_threshold:
-                logger.debug("所有集群资源都超过阈值，强制刷新资源状态")
-            else:
-                logger.debug(f"使用缓存的快照 (年龄: {current_time - self._last_cache_update:.2f}s)")
-                return self._cached_snapshots
+                # 如果所有集群都超过阈值（即没有可用资源），则强制刷新资源状态
+                if all_clusters_over_threshold:
+                    logger.debug("所有集群资源都超过阈值，强制刷新资源状态")
+                else:
+                    logger.debug(f"使用缓存的快照 (年龄: {current_time - self._last_cache_update:.2f}s)")
+                    return self._cached_snapshots.copy()  # 返回副本以避免外部修改
 
         # 获取所有集群的元数据
         cluster_metadata_list = []
@@ -189,9 +195,10 @@ class ClusterMonitor:
         self.health_checker.cluster_metadata = cluster_metadata_list
         snapshots = self.health_checker.check_health()
 
-        # Update cache
-        self._cached_snapshots = snapshots
-        self._last_cache_update = current_time
+        # Update cache with lock
+        with self._cache_lock:
+            self._cached_snapshots = snapshots
+            self._last_cache_update = current_time
 
         return snapshots
 

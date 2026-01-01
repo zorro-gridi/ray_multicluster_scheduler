@@ -20,6 +20,7 @@ class TaskDescription:
     tags: List[str] = field(default_factory=list)
     is_actor: bool = False
     preferred_cluster: Optional[str] = None  # 新增：指定首选集群名称
+    is_top_level_task: bool = True  # 是否为顶级任务，顶级任务受40秒限制，子任务不受限制
     runtime_env: Optional[Dict[str, Any]] = None  # 新增：运行时环境配置
 
 
