@@ -130,8 +130,11 @@ def submit_actor_async(actor_class: Type, args: tuple = (), kwargs: dict = None,
                 final_preferred_cluster = env_cluster
 
     # Create actor description
+    # 如果 name 为空，使用类名作为默认 name
+    actor_name = name if name else actor_class.__name__
+
     task_desc = TaskDescription(
-        name=name,
+        name=actor_name,
         func_or_class=actor_class,
         args=args,
         kwargs=kwargs,

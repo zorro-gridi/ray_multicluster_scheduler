@@ -20,6 +20,9 @@ class JobDescription:
     preferred_cluster: Optional[str] = None
     resource_requirements: Optional[Dict[str, float]] = None
     tags: Optional[List[str]] = None
+    # 新增字段：调度状态跟踪
+    scheduling_status: str = "PENDING"  # PENDING, QUEUED, SUBMITTED, RUNNING, COMPLETED, FAILED
+    actual_submission_id: Optional[str] = None  # 实际提交到Ray集群的submission_id
 
     def __post_init__(self):
         if not self.job_id:

@@ -61,10 +61,30 @@ def _ensure_scheduler_initialized():
 
 
 def _setup_signal_handlers():
-    """设置信号处理器来捕获中断信号"""
+    """设置信号处理器来捕获中断信号并停止所有 Ray jobs"""
     def signal_handler(signum, frame):
-        logger.info(f"Received signal {signum}, setting interrupt flag...")
+        logger.info(f"Received signal {signum}, stopping all Ray jobs...")
         _interrupted.set()
+
+        # 停止所有已提交的 jobs
+        if _submitted_job_ids:
+            try:
+                scheduler = get_unified_scheduler()
+                for job_id in list(_submitted_job_ids):  # 使用 list() 避免迭代时修改
+                    try:
+                        cluster_name = None
+                        if hasattr(scheduler.task_lifecycle_manager, 'job_cluster_mapping'):
+                            cluster_name = scheduler.task_lifecycle_manager.job_cluster_mapping.get(job_id)
+
+                        if cluster_name:
+                            logger.info(f"Stopping job {job_id} on cluster {cluster_name}...")
+                            stop_job(job_id, cluster_name)
+                        else:
+                            logger.warning(f"Cannot determine cluster for job {job_id}")
+                    except Exception as e:
+                        logger.error(f"Error stopping job {job_id}: {e}")
+            except Exception as e:
+                logger.error(f"Error accessing scheduler to stop jobs: {e}")
 
     # 注册信号处理器
     signal.signal(signal.SIGINT, signal_handler)
@@ -175,13 +195,14 @@ def submit_job(
     return submission_id_result
 
 
-def get_job_status(submission_id: str, cluster_name: str) -> Any:
+def get_job_status(submission_id: str, cluster_name: Optional[str] = None) -> Any:
     """
     Get the status of a submitted job using submission_id.
 
     Args:
         submission_id (str): The submission ID returned by submit_job()
-        cluster_name (str): The cluster where the job was submitted
+        cluster_name (str, optional): The cluster where the job was submitted.
+                                     If None, will search all clusters or check scheduling status.
 
     Returns:
         Any: Job status information
@@ -190,6 +211,10 @@ def get_job_status(submission_id: str, cluster_name: str) -> Any:
     scheduler = get_unified_scheduler()
 
     logger.info(f"查询任务状态，submission_id: {submission_id}, cluster: {cluster_name}")
+
+    # 如果没有指定集群，首先检查调度状态
+    if cluster_name is None:
+        return _get_job_status_from_all_clusters(submission_id)
 
     # Get the job status from the specific cluster
     job_client = scheduler.task_lifecycle_manager.connection_manager.get_job_client(cluster_name)
@@ -314,6 +339,9 @@ def wait_for_all_jobs(submission_ids: list, check_interval: int = 5, timeout: Op
                     print(f"Job {submission_id} 状态未知，可能作业已不存在或无法找到")
                     # 记录为失败状态
                     raise RuntimeError(f"Job {submission_id} 状态未知，可能作业已不存在")
+                elif status in ["QUEUED", "PENDING"]:  # 仍在队列中等待
+                    print(f"Job {submission_id} 状态: {status}，正在等待资源释放")
+                    still_running.append((submission_id, status))
                 else:  # 运行中或其他状态
                     still_running.append((submission_id, status))
 
@@ -388,6 +416,7 @@ def get_job_info(submission_id: str, cluster_name: str) -> Any:
 def _get_job_status_from_all_clusters(submission_id: str) -> str:
     """
     在所有集群中查找作业状态，当无法确定作业提交到哪个集群时使用。
+    同时检查作业是否仍在调度系统的队列中。
 
     Args:
         submission_id (str): The submission ID to look for
@@ -398,27 +427,95 @@ def _get_job_status_from_all_clusters(submission_id: str) -> str:
     _ensure_scheduler_initialized()
     scheduler = get_unified_scheduler()
 
-    # Try all registered clusters to find the job
+    # 首先检查是否是job_id而非submission_id
+    job_desc = scheduler.task_lifecycle_manager.get_job_scheduling_status(submission_id)
+    if job_desc:
+        # 这是一个job_id，检查其调度状态
+        if job_desc.scheduling_status == "QUEUED":
+            logger.info(f"作业 {submission_id} 正在队列中等待资源")
+            return "QUEUED"
+        elif job_desc.scheduling_status == "PENDING":
+            logger.info(f"作业 {submission_id} 正在等待调度决策")
+            return "PENDING"
+        elif job_desc.scheduling_status == "SUBMITTED":
+            # 作业已提交，使用实际的submission_id查询
+            if job_desc.actual_submission_id:
+                submission_id = job_desc.actual_submission_id
+                logger.info(f"作业 {job_desc.job_id} 已提交，使用实际submission_id {submission_id} 查询状态")
+            else:
+                logger.warning(f"作业 {submission_id} 状态为SUBMITTED但缺少实际submission_id")
+                return "UNKNOWN"
+
+    # 检查是否在任务队列中（包括全局队列和集群队列）
+    task_queue = scheduler.task_lifecycle_manager.task_queue
+
+    # 检查全局作业队列
+    for job_in_queue in task_queue.global_job_queue:
+        if job_in_queue.job_id == submission_id:
+            logger.info(f"作业 {submission_id} 在全局作业队列中等待")
+            return "QUEUED"
+
+    # 检查集群作业队列
+    for cluster_name, cluster_queue in task_queue.cluster_job_queues.items():
+        for job_in_queue in cluster_queue:
+            if job_in_queue.job_id == submission_id:
+                logger.info(f"作业 {submission_id} 在集群 {cluster_name} 作业队列中等待")
+                return "QUEUED"
+
+    # 检查跟踪列表中的排队作业
+    for queued_job in scheduler.task_lifecycle_manager.queued_jobs:
+        if queued_job.job_id == submission_id:
+            logger.info(f"作业 {submission_id} 在跟踪列表中排队等待")
+            return "QUEUED"
+
+    # 如果是实际的submission_id，尝试在所有集群中查找
+    # 首先检查是否可以通过映射找到实际的submission_id
+    actual_submission_id = submission_id
+    job_desc_for_mapping = scheduler.task_lifecycle_manager.get_job_scheduling_status(submission_id)
+
+    if job_desc_for_mapping and job_desc_for_mapping.actual_submission_id:
+        # 如果找到了映射关系，使用实际的submission_id
+        actual_submission_id = job_desc_for_mapping.actual_submission_id
+        logger.info(f"通过映射关系找到实际submission_id: {submission_id} -> {actual_submission_id}")
+    else:
+        # 尝试反向查找：通过actual_submission_id找job_id
+        reverse_job_id = scheduler.task_lifecycle_manager.get_job_id_by_submission_id(submission_id)
+        if reverse_job_id:
+            reverse_job_desc = scheduler.task_lifecycle_manager.get_job_scheduling_status(reverse_job_id)
+            if reverse_job_desc and reverse_job_desc.actual_submission_id:
+                actual_submission_id = reverse_job_desc.actual_submission_id
+                logger.info(f"通过反向映射找到实际submission_id: {submission_id} -> {actual_submission_id}")
+
+    # 使用实际的submission_id在所有集群中查找
     for registered_cluster_name in scheduler.task_lifecycle_manager.connection_manager.list_registered_clusters():
         try:
             job_client = scheduler.task_lifecycle_manager.connection_manager.get_job_client(registered_cluster_name)
             if job_client:
                 try:
-                    # Try to get the job status from this cluster using submission_id
-                    logger.debug(f"尝试从集群 {registered_cluster_name} 查询任务 {submission_id}")
-                    status = job_client.get_job_status(submission_id)
-                    logger.info(f"在集群 {registered_cluster_name} 找到任务 {submission_id}，状态: {status}")
+                    # Try to get the job status from this cluster using actual submission_id
+                    logger.debug(f"尝试从集群 {registered_cluster_name} 查询任务 {actual_submission_id}")
+                    status = job_client.get_job_status(actual_submission_id)
+                    logger.info(f"在集群 {registered_cluster_name} 找到任务 {actual_submission_id}，状态: {status}")
                     return status
                 except Exception as e:
                     # Job might not exist on this cluster, continue to next cluster
-                    logger.debug(f"集群 {registered_cluster_name} 中未找到任务 {submission_id}: {e}")
+                    logger.debug(f"集群 {registered_cluster_name} 中未找到任务 {actual_submission_id}: {e}")
                     continue
         except Exception as e:
             logger.debug(f"无法连接到集群 {registered_cluster_name}: {e}")
             continue
 
-    # If job was not found on any cluster, return UNKNOWN
-    logger.warning(f"在所有集群中都未找到任务 {submission_id}")
+    # 检查是否在调度器的队列中
+    # 查找对应的job_id
+    job_id = scheduler.task_lifecycle_manager.get_job_id_by_submission_id(submission_id)
+    if job_id:
+        job_desc = scheduler.task_lifecycle_manager.get_job_scheduling_status(job_id)
+        if job_desc and job_desc.scheduling_status == "QUEUED":
+            logger.info(f"作业 {job_id} (submission_id: {submission_id}) 正在队列中等待资源")
+            return "QUEUED"
+
+    # If job was not found on any cluster or queue, return UNKNOWN
+    logger.warning(f"在所有集群和队列中都未找到任务 {submission_id}")
     return "UNKNOWN"
 
 

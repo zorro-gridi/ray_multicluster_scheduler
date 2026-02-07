@@ -1,4 +1,34 @@
 """
+================================================================================
+DEPRECATED - This module is scheduled for removal
+================================================================================
+
+This module (BackpressureController) has been deprecated and is no longer used
+in the system. It will be removed in a future release.
+
+REASON FOR DEPRECATION:
+- This module implemented a GLOBAL backpressure strategy that only triggered
+  backpressure when ALL clusters exceeded the resource threshold
+- This approach has been replaced by a more fine-grained PER-CLUSTER resource
+  management system implemented in PolicyEngine
+- The 40-second rule (同一集群连续提交间隔) provides additional backpressure
+  mechanism, making this global controller redundant
+
+REPLACEMENT:
+- PolicyEngine._make_scheduling_decision() implements per-cluster resource
+  threshold checking and queuing decisions
+- Each cluster is independently evaluated based on its CPU/GPU/Memory utilization
+- See: ray_multicluster_scheduler/scheduler/policy/policy_engine.py
+
+HISTORY:
+- Originally implemented as a global backpressure mechanism
+- Deprecated in: task_lifecycle_manager.py (2025-01)
+- No active usage found in codebase as of 2025-01
+
+For new backpressure requirements, please modify PolicyEngine instead.
+
+================================================================================
+
 Backpressure controller to manage task submission rate based on cluster load.
 """
 
@@ -36,41 +66,34 @@ class BackpressureController:
         self.last_check_time = current_time
 
         try:
-            # Calculate overall resource utilization across all clusters
-            # Using ResourceSnapshot data directly
-            total_cpu_used = 0
-            total_cpu_total = 0
-            total_mem_used = 0
-            total_mem_total = 0
+            # Check if ANY cluster has high resource utilization
+            # We'll use a more granular approach: if ALL clusters are above threshold, then apply backpressure
+            any_cluster_available = False
+            all_clusters_above_threshold = True
 
-            for snapshot in cluster_snapshots.values():
-                # Use ResourceSnapshot fields directly
-                total_cpu_used += snapshot.cluster_cpu_used_cores
-                total_cpu_total += snapshot.cluster_cpu_total_cores
-                total_mem_used += snapshot.cluster_mem_used_mb
-                total_mem_total += snapshot.cluster_mem_total_mb
+            for cluster_name, snapshot in cluster_snapshots.items():
+                # Calculate utilization for this specific cluster
+                cpu_utilization = snapshot.cluster_cpu_used_cores / snapshot.cluster_cpu_total_cores if snapshot.cluster_cpu_total_cores > 0 else 0
+                memory_utilization = snapshot.cluster_mem_used_mb / snapshot.cluster_mem_total_mb if snapshot.cluster_mem_total_mb > 0 else 0
 
-            # If no resources are available, skip calculation
-            if total_cpu_total == 0 and total_mem_total == 0:
-                self.backpressure_active = False
-                return False
+                # Use the higher utilization of CPU or memory for this cluster
+                cluster_max_utilization = max(cpu_utilization, memory_utilization)
 
-            # Calculate utilization ratios
-            cpu_utilization = total_cpu_used / total_cpu_total if total_cpu_total > 0 else 0
-            memory_utilization = total_mem_used / total_mem_total if total_mem_total > 0 else 0
+                # If this cluster's utilization is below threshold, it's available
+                if cluster_max_utilization <= self.threshold:
+                    any_cluster_available = True
+                    all_clusters_above_threshold = False
+                    break  # At least one cluster is available, so no backpressure needed
 
-            # Use the higher utilization of CPU or memory
-            max_utilization = max(cpu_utilization, memory_utilization)
-
-            # Apply backpressure if utilization exceeds threshold
-            self.backpressure_active = max_utilization > self.threshold
+            # Apply backpressure only if ALL clusters are above threshold
+            self.backpressure_active = all_clusters_above_threshold
 
             if self.backpressure_active:
-                logger.warning(f"Backpressure activated: cluster utilization CPU={cpu_utilization:.2%}, "
-                              f"Memory={memory_utilization:.2%} exceeds threshold {self.threshold}")
+                logger.warning(f"Backpressure activated: ALL clusters exceed threshold {self.threshold}")
+            elif any_cluster_available:
+                logger.debug(f"At least one cluster is available, no backpressure")
             else:
-                logger.debug(f"Cluster utilization CPU={cpu_utilization:.2f}, Memory={memory_utilization:.2f} "
-                            f"below threshold {self.threshold}, backpressure inactive")
+                logger.debug(f"All clusters unavailable but not above threshold, no backpressure")
 
             return self.backpressure_active
         except Exception as e:
