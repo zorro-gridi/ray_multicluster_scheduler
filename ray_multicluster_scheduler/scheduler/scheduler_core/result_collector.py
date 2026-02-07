@@ -146,13 +146,15 @@ class AsyncResultCollector:
 
     async def collect_with_context(self, future: ray.ObjectRef, timeout: float = None) -> Any:
         """Collect result with proper Ray context handling."""
-        # Ensure Ray is initialized
+        # Track if we initialized ray ourselves
+        we_initialized = False
         if not ray.is_initialized():
             logger.warning("Ray is not initialized, initializing with specified address or local mode")
             if self.ray_address:
                 ray.init(address=self.ray_address, ignore_reinit_error=True)
             else:
                 ray.init(ignore_reinit_error=True)
+            we_initialized = True
 
         try:
             return await self.result_collector.collect_result_async(future, timeout)
@@ -160,25 +162,37 @@ class AsyncResultCollector:
             logger.error(f"Error collecting result with context: {e}")
             raise
         finally:
-            # Don't shutdown Ray if it was already initialized before this call
-            # We only shutdown if we initialized it in this method
-            pass
+            # Only shutdown if we initialized ray in this method
+            if we_initialized and ray.is_initialized():
+                try:
+                    ray.shutdown()
+                except Exception as shutdown_error:
+                    logger.warning(f"Error during ray shutdown in collect_with_context: {shutdown_error}")
 
     def get_task_status_with_context(self, future: ray.ObjectRef) -> Dict[str, Any]:
         """Get task status with proper Ray context handling."""
-        # Ensure Ray is initialized
+        # Track if we initialized ray ourselves
+        we_initialized = False
         if not ray.is_initialized():
             logger.warning("Ray is not initialized, initializing with specified address or local mode")
             if self.ray_address:
                 ray.init(address=self.ray_address, ignore_reinit_error=True)
             else:
                 ray.init(ignore_reinit_error=True)
+            we_initialized = True
 
         try:
             return self.result_collector.get_task_status(future)
         except Exception as e:
             logger.error(f"Error getting task status with context: {e}")
             raise
+        finally:
+            # Only shutdown if we initialized ray in this method
+            if we_initialized and ray.is_initialized():
+                try:
+                    ray.shutdown()
+                except Exception as shutdown_error:
+                    logger.warning(f"Error during ray shutdown in get_task_status_with_context: {shutdown_error}")
 
 
 class ClusterResultCollector:

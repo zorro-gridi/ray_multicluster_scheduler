@@ -156,8 +156,8 @@ class RayClientPool:
                 try:
                     if ray.is_initialized():
                         ray.shutdown()
-                except:
-                    pass  # 如果shutdown失败，继续尝试
+                except Exception as shutdown_error:
+                    logger.warning(f"Error during ray shutdown: {shutdown_error}")
                 # 更新连接状态
                 self.mark_cluster_disconnected(cluster_name)
             self.current_cluster = None  # 重置current_cluster
@@ -172,8 +172,8 @@ class RayClientPool:
                 try:
                     if ray.is_initialized():
                         ray.shutdown()
-                except:
-                    pass  # 如果shutdown失败，继续尝试
+                except Exception as shutdown_error:
+                    logger.warning(f"Error during ray shutdown: {shutdown_error}")
                 # 更新连接状态
                 self.mark_cluster_disconnected(cluster_name)
             self.current_cluster = None  # 重置current_cluster
