@@ -17,6 +17,11 @@ from ray_multicluster_scheduler.common.logging import get_logger
 
 logger = get_logger(__name__)
 
+# 任务完成等待超时配置
+JOB_COMPLETION_TIMEOUT = 600.0  # 等待 Job 完成的超时时间（秒）
+TASK_COMPLETION_TIMEOUT = 600.0  # 等待 Task 完成的超时时间（秒）
+JOB_STATUS_CHECK_INTERVAL = 5  # 检查 Job 状态的间隔（秒）
+
 # 导入 submit_actor 模块的全局变量
 try:
     from ray_multicluster_scheduler.app.client_api.submit_actor import _task_results, _task_results_lock, _task_results_condition
@@ -182,7 +187,7 @@ class TaskLifecycleManager:
                 # 等待任务执行完成并获取结果
                 # 检查Ray连接状态，避免在关闭时获取结果
                 if ray.is_initialized():
-                    result = ray.get(future)
+                    result = ray.get(future, timeout=TASK_COMPLETION_TIMEOUT)
                     logger.info(f"任务 {task_desc.task_id} 执行完成，结果: {result}")
                 else:
                     logger.warning(f"Ray连接已关闭，无法获取任务 {task_desc.task_id} 的结果")
@@ -392,6 +397,46 @@ class TaskLifecycleManager:
                             break
 
         return new_job_desc
+
+    def _wait_for_job_completion(self, job_desc: JobDescription, cluster_name: str,
+                                  timeout: float = JOB_COMPLETION_TIMEOUT) -> str:
+        """
+        等待 Job 完成（SUCCEEDED/FAILED/STOPPED）
+
+        Args:
+            job_desc: Job 描述对象
+            cluster_name: 目标集群名称
+            timeout: 超时时间（秒）
+
+        Returns:
+            最终状态: SUCCEEDED/FAILED/STOPPED/TIMEOUT
+        """
+        if not job_desc.actual_submission_id:
+            logger.warning(f"Job {job_desc.job_id} 没有实际的 submission_id，无法等待完成")
+            return "UNKNOWN"
+
+        start_time = time.time()
+        job_client = self.connection_manager.get_job_client(cluster_name)
+
+        while time.time() - start_time < timeout:
+            try:
+                status = job_client.get_job_status(job_desc.actual_submission_id)
+                logger.info(f"Job {job_desc.job_id} (submission_id: {job_desc.actual_submission_id}) "
+                           f"当前状态: {status}")
+
+                if status in ["SUCCEEDED", "FAILED", "STOPPED"]:
+                    logger.info(f"Job {job_desc.job_id} 已完成，状态: {status}")
+                    return status
+
+                # 继续等待
+                time.sleep(JOB_STATUS_CHECK_INTERVAL)
+
+            except Exception as e:
+                logger.error(f"检查 Job {job_desc.job_id} 状态时出错: {e}")
+                time.sleep(JOB_STATUS_CHECK_INTERVAL)
+
+        logger.warning(f"等待 Job {job_desc.job_id} 完成超时 ({timeout}秒)")
+        return "TIMEOUT"
 
     def submit_task_and_get_future(self, task_desc: TaskDescription) -> Optional[Any]:
         """Submit a task and return a future for the result."""
@@ -819,7 +864,7 @@ class TaskLifecycleManager:
                                         _task_results[task_desc.task_id] = future
                                         _task_results_condition.notify_all()  # 通知等待的线程
                                 else:
-                                    result = ray.get(future)
+                                    result = ray.get(future, timeout=TASK_COMPLETION_TIMEOUT)
                                     logger.info(f"任务 {task_desc.task_id} 在集群 {source_cluster_queue} 执行完成，结果: {result}")
                             except Exception as e:
                                 logger.error(f"获取任务 {task_desc.task_id} 结果时出错: {e}")
@@ -908,7 +953,7 @@ class TaskLifecycleManager:
                                         _task_results[task_desc.task_id] = future
                                         _task_results_condition.notify_all()  # 通知等待的线程
                                 else:
-                                    result = ray.get(future)
+                                    result = ray.get(future, timeout=TASK_COMPLETION_TIMEOUT)
                                     logger.info(f"任务 {task_desc.task_id} 执行完成，结果: {result}")
                             except Exception as e:
                                 logger.error(f"获取任务 {task_desc.task_id} 结果时出错: {e}")
@@ -1084,6 +1129,13 @@ class TaskLifecycleManager:
                 # 添加反向映射：job_id -> actual_submission_id
                 self.job_id_to_actual_submission_id[job_desc.job_id] = actual_submission_id
                 logger.info(f"作业 {job_desc.job_id} 在集群 {source_cluster_queue} 提交完成，实际submission_id: {actual_submission_id}")
+
+                # 等待 Job 完成
+                logger.info(f"开始等待 Job {job_desc.job_id} 完成...")
+                final_status = self._wait_for_job_completion(job_desc, source_cluster_queue,
+                                                              timeout=JOB_COMPLETION_TIMEOUT)
+                job_desc.scheduling_status = final_status
+                logger.info(f"Job {job_desc.job_id} 最终状态: {final_status}")
                 return
 
             # 如果作业来自全局队列，需要经过policy调度策略评估，决策目标调度集群
@@ -1133,6 +1185,13 @@ class TaskLifecycleManager:
                 # 添加反向映射：job_id -> actual_submission_id
                 self.job_id_to_actual_submission_id[job_desc.job_id] = actual_submission_id
                 logger.info(f"作业 {job_desc.job_id} 提交完成，实际submission_id: {actual_submission_id}")
+
+                # 等待 Job 完成
+                logger.info(f"开始等待 Job {job_desc.job_id} 完成...")
+                final_status = self._wait_for_job_completion(job_desc, decision.cluster_name,
+                                                              timeout=JOB_COMPLETION_TIMEOUT)
+                job_desc.scheduling_status = final_status
+                logger.info(f"Job {job_desc.job_id} 最终状态: {final_status}")
             else:
                 # If no cluster is available, re-enqueue the job
                 logger.warning(f"没有可用集群处理作业 {job_desc.job_id}，重新加入队列")
