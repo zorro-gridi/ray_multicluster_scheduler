@@ -95,7 +95,7 @@ env_vars:
     ${PYTHONPATH}
 - 2. 控制台显示 project/pycharm/Fund/Index_Markup_Forecasting/index_ts_forecasting_model/cat/predict_cluster.py 决策调度到 mac 集群，但是任务很快因为环境配置错误失败，因为 mac 集群任务调度 runtime_env 显示的是 centos 的配置
 - 3. 用户主控程序通过 submit_job 接口提交任务，在centos和mac集群上还启动了以下的伴生程序
-* /Users/zorro/miniconda3/envs/k8s/bin/python3.10 -m ray.util.client.server --address=192.168.5.2:6379 --host=0.0.0.0 --port=23056 --mode=specific-server
+* /Users/zorro/miniconda3/envs/k8s/bin/python3.10 -m ray.util.client.server --address=127.0.0.1:6379 --host=0.0.0.0 --port=23056 --mode=specific-server
 * /home/ray/anaconda3/bin/python -m ray.util.client.server --address=192.168.0.145:6379 --host=0.0.0.0 --port=23002 --mode=specific-server
 
 # 问题原因

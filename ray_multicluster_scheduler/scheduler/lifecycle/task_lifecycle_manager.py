@@ -52,6 +52,12 @@ class TaskLifecycleManager:
         self.job_scheduling_mapping: Dict[str, JobDescription] = {}
         # Track actual submission_id to job_id mapping
         self.submission_to_job_mapping: Dict[str, str] = {}
+        # 添加：job_id -> actual_submission_id 的映射，用于反向查找
+        self.job_id_to_actual_submission_id: Dict[str, str] = {}
+        # task_id -> Ray ObjectRef 的映射，用于任务状态查询
+        self.task_to_future_mapping: Dict[str, Any] = {}
+        # task_id -> 目标集群名称 的映射
+        self.task_to_cluster_mapping: Dict[str, str] = {}
 
     def _is_duplicate_task_in_tracked_list(self, task_desc: TaskDescription) -> bool:
         """Check if a task with the same content is already in the tracked queued tasks list."""
@@ -775,6 +781,9 @@ class TaskLifecycleManager:
 
                 # 直接调度到指定集群
                 future = self.dispatcher.dispatch_task(task_desc, source_cluster_queue)
+                # 记录 task_id 到 future (ObjectRef) 和集群的映射
+                self.task_to_future_mapping[task_desc.task_id] = future
+                self.task_to_cluster_mapping[task_desc.task_id] = source_cluster_queue
 
                 # 检查Ray连接状态，避免在关闭时获取结果
                 # 但首先检查任务类型，避免对actor handle调用ray.get()
@@ -861,6 +870,9 @@ class TaskLifecycleManager:
 
                 # 实际调度任务到选定的集群
                 future = self.dispatcher.dispatch_task(task_desc, decision.cluster_name)
+                # 记录 task_id 到 future (ObjectRef) 和集群的映射
+                self.task_to_future_mapping[task_desc.task_id] = future
+                self.task_to_cluster_mapping[task_desc.task_id] = decision.cluster_name
 
                 # 处理任务结果 - 区分 actor 和 function
                 if task_desc.is_actor:
@@ -1069,6 +1081,8 @@ class TaskLifecycleManager:
                 self.job_cluster_mapping[actual_submission_id] = source_cluster_queue
                 self.submission_to_job_mapping[actual_submission_id] = job_desc.job_id
                 self.job_scheduling_mapping[job_desc.job_id] = job_desc
+                # 添加反向映射：job_id -> actual_submission_id
+                self.job_id_to_actual_submission_id[job_desc.job_id] = actual_submission_id
                 logger.info(f"作业 {job_desc.job_id} 在集群 {source_cluster_queue} 提交完成，实际submission_id: {actual_submission_id}")
                 return
 
@@ -1116,6 +1130,8 @@ class TaskLifecycleManager:
                 self.job_cluster_mapping[actual_submission_id] = decision.cluster_name
                 self.submission_to_job_mapping[actual_submission_id] = job_desc.job_id
                 self.job_scheduling_mapping[job_desc.job_id] = job_desc
+                # 添加反向映射：job_id -> actual_submission_id
+                self.job_id_to_actual_submission_id[job_desc.job_id] = actual_submission_id
                 logger.info(f"作业 {job_desc.job_id} 提交完成，实际submission_id: {actual_submission_id}")
             else:
                 # If no cluster is available, re-enqueue the job

@@ -446,6 +446,18 @@ def _get_job_status_from_all_clusters(submission_id: str) -> str:
                 logger.warning(f"作业 {submission_id} 状态为SUBMITTED但缺少实际submission_id")
                 return "UNKNOWN"
 
+    # 优先检查是否可以通过 job_id -> actual_submission_id 映射找到
+    actual_submission_id = submission_id
+    if submission_id in scheduler.task_lifecycle_manager.job_id_to_actual_submission_id:
+        actual_submission_id = scheduler.task_lifecycle_manager.job_id_to_actual_submission_id[submission_id]
+        logger.info(f"通过 job_id -> actual_submission_id 映射找到: {submission_id} -> {actual_submission_id}")
+    else:
+        # 尝试使用 get_job_scheduling_status 返回的 job_desc 查找 actual_submission_id
+        job_desc_for_mapping = scheduler.task_lifecycle_manager.get_job_scheduling_status(submission_id)
+        if job_desc_for_mapping and job_desc_for_mapping.actual_submission_id:
+            actual_submission_id = job_desc_for_mapping.actual_submission_id
+            logger.info(f"通过 get_job_scheduling_status 找到 actual_submission_id: {actual_submission_id}")
+
     # 检查是否在任务队列中（包括全局队列和集群队列）
     task_queue = scheduler.task_lifecycle_manager.task_queue
 
@@ -467,24 +479,6 @@ def _get_job_status_from_all_clusters(submission_id: str) -> str:
         if queued_job.job_id == submission_id:
             logger.info(f"作业 {submission_id} 在跟踪列表中排队等待")
             return "QUEUED"
-
-    # 如果是实际的submission_id，尝试在所有集群中查找
-    # 首先检查是否可以通过映射找到实际的submission_id
-    actual_submission_id = submission_id
-    job_desc_for_mapping = scheduler.task_lifecycle_manager.get_job_scheduling_status(submission_id)
-
-    if job_desc_for_mapping and job_desc_for_mapping.actual_submission_id:
-        # 如果找到了映射关系，使用实际的submission_id
-        actual_submission_id = job_desc_for_mapping.actual_submission_id
-        logger.info(f"通过映射关系找到实际submission_id: {submission_id} -> {actual_submission_id}")
-    else:
-        # 尝试反向查找：通过actual_submission_id找job_id
-        reverse_job_id = scheduler.task_lifecycle_manager.get_job_id_by_submission_id(submission_id)
-        if reverse_job_id:
-            reverse_job_desc = scheduler.task_lifecycle_manager.get_job_scheduling_status(reverse_job_id)
-            if reverse_job_desc and reverse_job_desc.actual_submission_id:
-                actual_submission_id = reverse_job_desc.actual_submission_id
-                logger.info(f"通过反向映射找到实际submission_id: {submission_id} -> {actual_submission_id}")
 
     # 使用实际的submission_id在所有集群中查找
     for registered_cluster_name in scheduler.task_lifecycle_manager.connection_manager.list_registered_clusters():

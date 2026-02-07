@@ -52,6 +52,12 @@ class TaskLifecycleManager:
         self.job_scheduling_mapping: Dict[str, JobDescription] = {}
         # Track actual submission_id to job_id mapping
         self.submission_to_job_mapping: Dict[str, str] = {}
+        # 添加：job_id -> actual_submission_id 的映射，用于反向查找
+        self.job_id_to_actual_submission_id: Dict[str, str] = {}
+        # task_id -> Ray ObjectRef 的映射，用于任务状态查询
+        self.task_to_future_mapping: Dict[str, Any] = {}
+        # task_id -> 目标集群名称 的映射
+        self.task_to_cluster_mapping: Dict[str, str] = {}
 
     def _is_duplicate_task_in_tracked_list(self, task_desc: TaskDescription) -> bool:
         """Check if a task with the same content is already in the tracked queued tasks list."""
@@ -687,6 +693,14 @@ class TaskLifecycleManager:
             cluster_snapshots: Current cluster resource snapshots
             source_cluster_queue: Name of the cluster queue this task came from, if any
         """
+        # 并发保护：检查任务是否已在处理中
+        if task_desc.is_processing:
+            logger.warning(f"任务 {task_desc.task_id} 已在处理中，跳过重复执行")
+            return
+
+        # 标记任务为处理中
+        task_desc.is_processing = True
+
         try:
             # Ensure connections are initialized
             if not self._initialized:
@@ -714,8 +728,9 @@ class TaskLifecycleManager:
                     success = self.connection_manager.ensure_cluster_connection(source_cluster_queue)
                     if not success:
                         logger.error(f"无法连接到目标集群 {source_cluster_queue}，任务 {task_desc.task_id} 重新加入队列")
-                        # Task is already in queue, no need to re-add
-                        # Just ensure it's tracked in the queued_tasks list
+                        # 重新加入task_queue以保持一致性（关键修复：确保任务不会丢失）
+                        self.task_queue.enqueue(task_desc, source_cluster_queue)
+                        # 更新跟踪列表
                         if not self._is_duplicate_task_in_tracked_list(task_desc):
                             self.queued_tasks.append(task_desc)  # Track queued tasks
                         return
@@ -723,8 +738,9 @@ class TaskLifecycleManager:
                 # 检查目标集群是否健康可用
                 if source_cluster_queue not in cluster_snapshots:
                     logger.error(f"目标集群 {source_cluster_queue} 不在线或无法连接，任务 {task_desc.task_id} 重新加入队列")
-                    # Task is already in queue, no need to re-add
-                    # Just ensure it's tracked in the queued_tasks list
+                    # 重新加入task_queue以保持一致性（关键修复：确保任务不会丢失）
+                    self.task_queue.enqueue(task_desc, source_cluster_queue)
+                    # 更新跟踪列表
                     if not self._is_duplicate_task_in_tracked_list(task_desc):
                         self.queued_tasks.append(task_desc)  # Track queued tasks
                     return
@@ -751,8 +767,9 @@ class TaskLifecycleManager:
                 # 检查资源使用率是否仍超过阈值
                 if cpu_utilization > self.policy_engine.RESOURCE_THRESHOLD or gpu_utilization > self.policy_engine.RESOURCE_THRESHOLD or mem_utilization > self.policy_engine.RESOURCE_THRESHOLD:
                     logger.warning(f"目标集群 {source_cluster_queue} 资源使用率仍然超过阈值，任务 {task_desc.task_id} 重新进入该集群队列等待")
-                    # Task is already in queue, no need to re-add
-                    # Just ensure it's tracked in the queued_tasks list
+                    # 重新加入task_queue以保持一致性（关键修复：确保任务不会丢失）
+                    self.task_queue.enqueue(task_desc, source_cluster_queue)
+                    # 更新跟踪列表
                     if not self._is_duplicate_task_in_tracked_list(task_desc):
                         self.queued_tasks.append(task_desc)  # Track queued tasks
                     return
@@ -764,6 +781,9 @@ class TaskLifecycleManager:
 
                 # 直接调度到指定集群
                 future = self.dispatcher.dispatch_task(task_desc, source_cluster_queue)
+                # 记录 task_id 到 future (ObjectRef) 和集群的映射
+                self.task_to_future_mapping[task_desc.task_id] = future
+                self.task_to_cluster_mapping[task_desc.task_id] = source_cluster_queue
 
                 # 检查Ray连接状态，避免在关闭时获取结果
                 # 但首先检查任务类型，避免对actor handle调用ray.get()
@@ -812,6 +832,11 @@ class TaskLifecycleManager:
                             with _task_results_condition:
                                 _task_results[task_desc.task_id] = future
                                 _task_results_condition.notify_all()  # 通知等待的线程
+
+                # 从跟踪列表中移除已处理的任务（集群队列路径）
+                if task_desc in self.queued_tasks:
+                    self.queued_tasks.remove(task_desc)
+
                 return
 
             # 如果任务来自全局队列，按照规则2：需要经过policy调度策略评估，决策目标调度集群
@@ -828,8 +853,12 @@ class TaskLifecycleManager:
                     success = self.connection_manager.ensure_cluster_connection(decision.cluster_name)
                     if not success:
                         logger.error(f"无法连接到目标集群 {decision.cluster_name}，任务 {task_desc.task_id} 重新加入队列")
-                        # Task is already in queue, no need to re-add
-                        # Just ensure it's tracked in the queued_tasks list
+                        # 重新加入task_queue以保持一致性（关键修复：确保任务不会丢失）
+                        if task_desc.preferred_cluster:
+                            self.task_queue.enqueue(task_desc, task_desc.preferred_cluster)
+                        else:
+                            self.task_queue.enqueue(task_desc)
+                        # 更新跟踪列表
                         if not self._is_duplicate_task_in_tracked_list(task_desc):
                             self.queued_tasks.append(task_desc)  # Track queued tasks
                         return
@@ -841,6 +870,9 @@ class TaskLifecycleManager:
 
                 # 实际调度任务到选定的集群
                 future = self.dispatcher.dispatch_task(task_desc, decision.cluster_name)
+                # 记录 task_id 到 future (ObjectRef) 和集群的映射
+                self.task_to_future_mapping[task_desc.task_id] = future
+                self.task_to_cluster_mapping[task_desc.task_id] = decision.cluster_name
 
                 # 处理任务结果 - 区分 actor 和 function
                 if task_desc.is_actor:
@@ -889,11 +921,20 @@ class TaskLifecycleManager:
                             with _task_results_condition:
                                 _task_results[task_desc.task_id] = future
                                 _task_results_condition.notify_all()  # 通知等待的线程
+
+                # 从跟踪列表中移除已处理的任务（全局队列路径）
+                if task_desc in self.queued_tasks:
+                    self.queued_tasks.remove(task_desc)
+
             else:
                 # If no cluster is available, re-enqueue the task
                 logger.warning(f"没有可用集群处理任务 {task_desc.task_id}，重新加入队列")
-                # Task is already in queue, no need to re-add
-                # Just ensure it's tracked in the queued_tasks list
+                # 重新加入task_queue以保持一致性（关键修复：确保任务不会丢失）
+                if task_desc.preferred_cluster:
+                    self.task_queue.enqueue(task_desc, task_desc.preferred_cluster)
+                else:
+                    self.task_queue.enqueue(task_desc)
+                # 更新跟踪列表
                 if not self._is_duplicate_task_in_tracked_list(task_desc):
                     self.queued_tasks.append(task_desc)  # Track queued tasks
                 return
@@ -902,26 +943,42 @@ class TaskLifecycleManager:
             logger.error(f"任务 {task_desc.task_id} 失败，无健康集群: {e}")
             import traceback
             traceback.print_exc()
-            # Task is already in queue, no need to re-add
-            # Just ensure it's tracked in the queued_tasks list
+            # 重新加入task_queue以保持一致性（关键修复：确保任务不会丢失）
+            if task_desc.preferred_cluster:
+                self.task_queue.enqueue(task_desc, task_desc.preferred_cluster)
+            else:
+                self.task_queue.enqueue(task_desc)
+            # 更新跟踪列表
             if not self._is_duplicate_task_in_tracked_list(task_desc):
                 self.queued_tasks.append(task_desc)  # Track queued tasks
         except TaskSubmissionError as e:
             logger.error(f"任务 {task_desc.task_id} 提交失败: {e}")
             import traceback
             traceback.print_exc()
-            # Task is already in queue, no need to re-add
-            # Just ensure it's tracked in the queued_tasks list
+            # 重新加入task_queue以保持一致性（关键修复：确保任务不会丢失）
+            if task_desc.preferred_cluster:
+                self.task_queue.enqueue(task_desc, task_desc.preferred_cluster)
+            else:
+                self.task_queue.enqueue(task_desc)
+            # 更新跟踪列表
             if not self._is_duplicate_task_in_tracked_list(task_desc):
                 self.queued_tasks.append(task_desc)  # Track queued tasks
         except Exception as e:
             logger.error(f"任务 {task_desc.task_id} 意外失败: {e}")
             import traceback
             traceback.print_exc()
-            # Task is already in queue, no need to re-add
-            # Just ensure it's tracked in the queued_tasks list
+            # 重新加入task_queue以保持一致性（关键修复：确保任务不会丢失）
+            if task_desc.preferred_cluster:
+                self.task_queue.enqueue(task_desc, task_desc.preferred_cluster)
+            else:
+                self.task_queue.enqueue(task_desc)
+            # 更新跟踪列表
             if not self._is_duplicate_task_in_tracked_list(task_desc):
                 self.queued_tasks.append(task_desc)  # Track queued tasks
+
+        finally:
+            # 无论任务执行成功或失败，都清除处理中标记
+            task_desc.is_processing = False
 
     def _process_job(self, job_desc: JobDescription, cluster_snapshots: Dict[str, ResourceSnapshot], source_cluster_queue: str = None):
         """Process a single job.
@@ -958,8 +1015,9 @@ class TaskLifecycleManager:
                     success = self.connection_manager.ensure_cluster_connection(source_cluster_queue)
                     if not success:
                         logger.error(f"无法连接到目标集群 {source_cluster_queue}，作业 {job_desc.job_id} 重新加入队列")
-                        # Job is already in queue, no need to re-add
-                        # Just ensure it's tracked in the queued_jobs list
+                        # 重新加入task_queue以保持一致性（关键修复：确保任务不会丢失）
+                        self.task_queue.enqueue_job(job_desc, source_cluster_queue)
+                        # 更新跟踪列表
                         if not self._is_duplicate_job_in_tracked_list(job_desc):
                             self.queued_jobs.append(job_desc)  # Track queued jobs
                         return
@@ -967,8 +1025,9 @@ class TaskLifecycleManager:
                 # 检查目标集群是否健康可用
                 if source_cluster_queue not in cluster_snapshots:
                     logger.error(f"目标集群 {source_cluster_queue} 不在线或无法连接，作业 {job_desc.job_id} 重新加入队列")
-                    # Job is already in queue, no need to re-add
-                    # Just ensure it's tracked in the queued_jobs list
+                    # 重新加入task_queue以保持一致性（关键修复：确保任务不会丢失）
+                    self.task_queue.enqueue_job(job_desc, source_cluster_queue)
+                    # 更新跟踪列表
                     if not self._is_duplicate_job_in_tracked_list(job_desc):
                         self.queued_jobs.append(job_desc)  # Track queued jobs
                     return
@@ -995,8 +1054,9 @@ class TaskLifecycleManager:
                 # 检查资源使用率是否仍超过阈值
                 if cpu_utilization > self.policy_engine.RESOURCE_THRESHOLD or gpu_utilization > self.policy_engine.RESOURCE_THRESHOLD or mem_utilization > self.policy_engine.RESOURCE_THRESHOLD:
                     logger.warning(f"目标集群 {source_cluster_queue} 资源使用率仍然超过阈值，作业 {job_desc.job_id} 重新进入该集群队列等待")
-                    # Job is already in queue, no need to re-add
-                    # Just ensure it's tracked in the queued_jobs list
+                    # 重新加入task_queue以保持一致性（关键修复：确保任务不会丢失）
+                    self.task_queue.enqueue_job(job_desc, source_cluster_queue)
+                    # 更新跟踪列表
                     if not self._is_duplicate_job_in_tracked_list(job_desc):
                         self.queued_jobs.append(job_desc)  # Track queued jobs
                     return
@@ -1021,6 +1081,8 @@ class TaskLifecycleManager:
                 self.job_cluster_mapping[actual_submission_id] = source_cluster_queue
                 self.submission_to_job_mapping[actual_submission_id] = job_desc.job_id
                 self.job_scheduling_mapping[job_desc.job_id] = job_desc
+                # 添加反向映射：job_id -> actual_submission_id
+                self.job_id_to_actual_submission_id[job_desc.job_id] = actual_submission_id
                 logger.info(f"作业 {job_desc.job_id} 在集群 {source_cluster_queue} 提交完成，实际submission_id: {actual_submission_id}")
                 return
 
@@ -1038,8 +1100,12 @@ class TaskLifecycleManager:
                     success = self.connection_manager.ensure_cluster_connection(decision.cluster_name)
                     if not success:
                         logger.error(f"无法连接到目标集群 {decision.cluster_name}，作业 {job_desc.job_id} 重新加入队列")
-                        # Job is already in queue, no need to re-add
-                        # Just ensure it's tracked in the queued_jobs list
+                        # 重新加入task_queue以保持一致性（关键修复：确保任务不会丢失）
+                        if job_desc.preferred_cluster:
+                            self.task_queue.enqueue_job(job_desc, job_desc.preferred_cluster)
+                        else:
+                            self.task_queue.enqueue_job(job_desc)
+                        # 更新跟踪列表
                         if not self._is_duplicate_job_in_tracked_list(job_desc):
                             self.queued_jobs.append(job_desc)  # Track queued jobs
                         return
@@ -1064,12 +1130,18 @@ class TaskLifecycleManager:
                 self.job_cluster_mapping[actual_submission_id] = decision.cluster_name
                 self.submission_to_job_mapping[actual_submission_id] = job_desc.job_id
                 self.job_scheduling_mapping[job_desc.job_id] = job_desc
+                # 添加反向映射：job_id -> actual_submission_id
+                self.job_id_to_actual_submission_id[job_desc.job_id] = actual_submission_id
                 logger.info(f"作业 {job_desc.job_id} 提交完成，实际submission_id: {actual_submission_id}")
             else:
                 # If no cluster is available, re-enqueue the job
                 logger.warning(f"没有可用集群处理作业 {job_desc.job_id}，重新加入队列")
-                # Job is already in queue, no need to re-add
-                # Just ensure it's tracked in the queued_jobs list
+                # 重新加入task_queue以保持一致性（关键修复：确保任务不会丢失）
+                if job_desc.preferred_cluster:
+                    self.task_queue.enqueue_job(job_desc, job_desc.preferred_cluster)
+                else:
+                    self.task_queue.enqueue_job(job_desc)
+                # 更新跟踪列表
                 if not self._is_duplicate_job_in_tracked_list(job_desc):
                     self.queued_jobs.append(job_desc)  # Track queued jobs
                 return
@@ -1078,24 +1150,36 @@ class TaskLifecycleManager:
             logger.error(f"作业 {job_desc.job_id} 失败，无健康集群: {e}")
             import traceback
             traceback.print_exc()
-            # Job is already in queue, no need to re-add
-            # Just ensure it's tracked in the queued_jobs list
+            # 重新加入task_queue以保持一致性（关键修复：确保任务不会丢失）
+            if job_desc.preferred_cluster:
+                self.task_queue.enqueue_job(job_desc, job_desc.preferred_cluster)
+            else:
+                self.task_queue.enqueue_job(job_desc)
+            # 更新跟踪列表
             if not self._is_duplicate_job_in_tracked_list(job_desc):
                 self.queued_jobs.append(job_desc)  # Track queued jobs
         except TaskSubmissionError as e:
             logger.error(f"作业 {job_desc.job_id} 提交失败: {e}")
             import traceback
             traceback.print_exc()
-            # Job is already in queue, no need to re-add
-            # Just ensure it's tracked in the queued_jobs list
+            # 重新加入task_queue以保持一致性（关键修复：确保任务不会丢失）
+            if job_desc.preferred_cluster:
+                self.task_queue.enqueue_job(job_desc, job_desc.preferred_cluster)
+            else:
+                self.task_queue.enqueue_job(job_desc)
+            # 更新跟踪列表
             if not self._is_duplicate_job_in_tracked_list(job_desc):
                 self.queued_jobs.append(job_desc)  # Track queued jobs
         except Exception as e:
             logger.error(f"作业 {job_desc.job_id} 意外失败: {e}")
             import traceback
             traceback.print_exc()
-            # Job is already in queue, no need to re-add
-            # Just ensure it's tracked in the queued_jobs list
+            # 重新加入task_queue以保持一致性（关键修复：确保任务不会丢失）
+            if job_desc.preferred_cluster:
+                self.task_queue.enqueue_job(job_desc, job_desc.preferred_cluster)
+            else:
+                self.task_queue.enqueue_job(job_desc)
+            # 更新跟踪列表
             if not self._is_duplicate_job_in_tracked_list(job_desc):
                 self.queued_jobs.append(job_desc)  # Track queued jobs
 

@@ -22,6 +22,7 @@ class TaskDescription:
     preferred_cluster: Optional[str] = None  # 新增：指定首选集群名称
     is_top_level_task: bool = True  # 是否为顶级任务，顶级任务受40秒限制，子任务不受限制
     runtime_env: Optional[Dict[str, Any]] = None  # 新增：运行时环境配置
+    is_processing: bool = False  # 新增：标记任务是否正在处理，防止并发重复执行
 
 
 @dataclass

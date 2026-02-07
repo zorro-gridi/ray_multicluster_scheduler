@@ -195,5 +195,22 @@ def get_task_status(task_id: str) -> str:
         else:
             return "COMPLETED"
     else:
-        # 这里应该查询实际的任务状态，目前简化处理
+        # 尝试从 TaskLifecycleManager 获取状态
+        _ensure_scheduler_initialized()
+        scheduler = get_unified_scheduler()
+        lifecycle_manager = scheduler.task_lifecycle_manager
+
+        # 检查是否是 Ray ObjectRef
+        if task_id in lifecycle_manager.task_to_future_mapping:
+            future = lifecycle_manager.task_to_future_mapping[task_id]
+            try:
+                if ray.is_initialized():
+                    result = ray.get(future)
+                    # 任务已完成，将结果存储到 _task_results
+                    _task_results[task_id] = result
+                    return "COMPLETED"
+            except Exception as e:
+                logger.debug(f"获取任务 {task_id} 的 Ray future 结果时出错: {e}")
+            return "RUNNING"
+
         return "UNKNOWN"

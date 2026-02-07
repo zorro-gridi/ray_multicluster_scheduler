@@ -84,7 +84,7 @@ def main():
 # ray dashboard 动态描述
 - 1. 用户主控程序通过 submit_job 接口向集群提交任务，每一个任务都会启动了一个如下的守护进程
 ## mac 集群的守护进程入口
-* /Users/zorro/miniconda3/envs/k8s/bin/python3.10 -m ray.util.client.server --address=192.168.5.2:6379 --host=0.0.0.0 --port=23056 --mode=specific-server
+* /Users/zorro/miniconda3/envs/k8s/bin/python3.10 -m ray.util.client.server --address=127.0.0.1:6379 --host=0.0.0.0 --port=23056 --mode=specific-server
 ## centos 集群的守护进程入口
 * /home/ray/anaconda3/bin/python -m ray.util.client.server --address=192.168.0.145:6379 --host=0.0.0.0 --port=23002 --mode=specific-server
 

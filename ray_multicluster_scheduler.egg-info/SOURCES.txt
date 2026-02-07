@@ -103,3 +103,11 @@ ray_multicluster_scheduler/scheduler/queue/task_queue.py
 ray_multicluster_scheduler/scheduler/scheduler_core/__init__.py
 ray_multicluster_scheduler/scheduler/scheduler_core/dispatcher.py
 ray_multicluster_scheduler/scheduler/scheduler_core/result_collector.py
+test/test_actor_queue_fix.py
+test/test_concurrent_task_fix.py
+test/test_queue_job_fix.py
+test/test_rules_validation_test.py
+test/test_spec03_fix.py
+test/test_spec04_fix.py
+test/test_task_deduplication.py
+test/test_task_queue_fix.py

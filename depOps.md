@@ -765,8 +765,8 @@ ClusterConfig= {
     ),
     "mac": ClusterConfig(
         name="mac",
-        head_address="192.168.5.2:32546",
-        dashboard="http://192.168.5.2:8265",
+        head_address="127.0.0.1:32546",
+        dashboard="http://127.0.0.1:8265",
         prefer=True,
         weight=1.2,  # 偏好集群权重更高
         tags=["macos", "arm64"]
