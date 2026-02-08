@@ -826,6 +826,8 @@ class TaskLifecycleManager:
 
                 # 直接调度到指定集群
                 future = self.dispatcher.dispatch_task(task_desc, source_cluster_queue)
+                # 注册运行任务（用于串行模式检查）
+                TaskQueue.register_running_task(task_desc.task_id, source_cluster_queue, "task")
                 # 记录 task_id 到 future (ObjectRef) 和集群的映射
                 self.task_to_future_mapping[task_desc.task_id] = future
                 self.task_to_cluster_mapping[task_desc.task_id] = source_cluster_queue
@@ -915,6 +917,8 @@ class TaskLifecycleManager:
 
                 # 实际调度任务到选定的集群
                 future = self.dispatcher.dispatch_task(task_desc, decision.cluster_name)
+                # 注册运行任务（用于串行模式检查）
+                TaskQueue.register_running_task(task_desc.task_id, decision.cluster_name, "task")
                 # 记录 task_id 到 future (ObjectRef) 和集群的映射
                 self.task_to_future_mapping[task_desc.task_id] = future
                 self.task_to_cluster_mapping[task_desc.task_id] = decision.cluster_name
@@ -1024,6 +1028,11 @@ class TaskLifecycleManager:
         finally:
             # 无论任务执行成功或失败，都清除处理中标记
             task_desc.is_processing = False
+            # 注销运行任务（用于串行模式检查）
+            try:
+                TaskQueue.unregister_running_task(task_desc.task_id)
+            except Exception:
+                pass  # 忽略注销错误
 
     def _process_job(self, job_desc: JobDescription, cluster_snapshots: Dict[str, ResourceSnapshot], source_cluster_queue: str = None):
         """Process a single job.
@@ -1119,6 +1128,8 @@ class TaskLifecycleManager:
 
                 # 直接调度到指定集群
                 actual_submission_id = self.dispatcher.dispatch_job(converted_job_desc, source_cluster_queue)
+                # 注册运行任务（用于串行模式检查）
+                TaskQueue.register_running_task(actual_submission_id, source_cluster_queue, "job")
                 # 更新作业的实际submission_id和状态
                 job_desc.actual_submission_id = actual_submission_id
                 job_desc.scheduling_status = "SUBMITTED"
@@ -1134,6 +1145,8 @@ class TaskLifecycleManager:
                 logger.info(f"开始等待 Job {job_desc.job_id} 完成...")
                 final_status = self._wait_for_job_completion(job_desc, source_cluster_queue,
                                                               timeout=JOB_COMPLETION_TIMEOUT)
+                # 注销运行任务（用于串行模式检查）
+                TaskQueue.unregister_running_task(actual_submission_id)
                 job_desc.scheduling_status = final_status
                 logger.info(f"Job {job_desc.job_id} 最终状态: {final_status}")
                 return
@@ -1175,6 +1188,8 @@ class TaskLifecycleManager:
 
                 # 实际调度作业到选定的集群
                 actual_submission_id = self.dispatcher.dispatch_job(converted_job_desc, decision.cluster_name)
+                # 注册运行任务（用于串行模式检查）
+                TaskQueue.register_running_task(actual_submission_id, decision.cluster_name, "job")
                 # 更新作业的实际submission_id和状态
                 job_desc.actual_submission_id = actual_submission_id
                 job_desc.scheduling_status = "SUBMITTED"
@@ -1190,6 +1205,8 @@ class TaskLifecycleManager:
                 logger.info(f"开始等待 Job {job_desc.job_id} 完成...")
                 final_status = self._wait_for_job_completion(job_desc, decision.cluster_name,
                                                               timeout=JOB_COMPLETION_TIMEOUT)
+                # 注销运行任务（用于串行模式检查）
+                TaskQueue.unregister_running_task(actual_submission_id)
                 job_desc.scheduling_status = final_status
                 logger.info(f"Job {job_desc.job_id} 最终状态: {final_status}")
             else:
@@ -1241,6 +1258,13 @@ class TaskLifecycleManager:
             # 更新跟踪列表
             if not self._is_duplicate_job_in_tracked_list(job_desc):
                 self.queued_jobs.append(job_desc)  # Track queued jobs
+        finally:
+            # 注销运行任务（用于串行模式检查）- 确保即使发生错误也能正确注销
+            if job_desc.actual_submission_id:
+                try:
+                    TaskQueue.unregister_running_task(job_desc.actual_submission_id)
+                except Exception:
+                    pass  # 忽略注销错误
 
     def get_job_scheduling_status(self, job_id: str) -> Optional[JobDescription]:
         """获取作业的调度状态信息"""

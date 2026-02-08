@@ -12,6 +12,8 @@ setup.py
 ./ray_multicluster_scheduler/common/__init__.py
 ./ray_multicluster_scheduler/common/circuit_breaker.py
 ./ray_multicluster_scheduler/common/context_manager.py
+./ray_multicluster_scheduler/common/config/__init__.py
+./ray_multicluster_scheduler/common/config/settings.py
 ./ray_multicluster_scheduler/common/exception/__init__.py
 ./ray_multicluster_scheduler/common/logging/__init__.py
 ./ray_multicluster_scheduler/common/model/__init__.py
@@ -66,6 +68,8 @@ ray_multicluster_scheduler/app/client_api/unified_scheduler.py
 ray_multicluster_scheduler/common/__init__.py
 ray_multicluster_scheduler/common/circuit_breaker.py
 ray_multicluster_scheduler/common/context_manager.py
+ray_multicluster_scheduler/common/config/__init__.py
+ray_multicluster_scheduler/common/config/settings.py
 ray_multicluster_scheduler/common/exception/__init__.py
 ray_multicluster_scheduler/common/logging/__init__.py
 ray_multicluster_scheduler/common/model/__init__.py
@@ -105,8 +109,10 @@ ray_multicluster_scheduler/scheduler/scheduler_core/dispatcher.py
 ray_multicluster_scheduler/scheduler/scheduler_core/result_collector.py
 test/test_actor_queue_fix.py
 test/test_concurrent_task_fix.py
+test/test_is_cluster_busy_strict.py
 test/test_queue_job_fix.py
 test/test_rules_validation_test.py
+test/test_settings_integration.py
 test/test_spec03_fix.py
 test/test_spec04_fix.py
 test/test_task_deduplication.py

@@ -5,7 +5,7 @@ Task queue implementation for the ray multicluster scheduler.
 import threading
 import time
 from collections import deque, defaultdict
-from typing import Optional, Union, List
+from typing import Optional, Union, List, Dict
 from ray_multicluster_scheduler.common.model import TaskDescription
 from ray_multicluster_scheduler.common.model.job_description import JobDescription
 from ray_multicluster_scheduler.common.logging import get_logger
@@ -15,6 +15,10 @@ logger = get_logger(__name__)
 
 class TaskQueue:
     """A task queue implementation with both global and per-cluster queues, supporting both Task and Job types."""
+
+    # ==================== 运行任务跟踪（类级别） ====================
+    _running_tasks: Dict[str, Dict] = {}  # {task_id: {"cluster": cluster_name, "type": "task"/"job", "submitted_at": timestamp}}
+    _running_lock = threading.Lock()
 
     def __init__(self, max_size: int = 100):
         """
@@ -541,3 +545,81 @@ class TaskQueue:
         """Get a list of all cluster job queue names that have jobs."""
         with self.lock:
             return [name for name, queue in self.cluster_job_queues.items() if len(queue) > 0]
+
+    # ==================== 运行任务管理（类方法） ====================
+
+    @classmethod
+    def register_running_task(cls, task_id: str, cluster_name: str, task_type: str = "task") -> None:
+        """
+        Register a running task/job.
+
+        Args:
+            task_id: The task or job ID
+            cluster_name: The cluster where the task/job is running
+            task_type: "task" or "job"
+        """
+        with cls._running_lock:
+            cls._running_tasks[task_id] = {
+                "cluster": cluster_name,
+                "type": task_type,
+                "submitted_at": time.time()
+            }
+            logger.debug(f"Registered running task/job {task_id} on cluster {cluster_name}")
+
+    @classmethod
+    def unregister_running_task(cls, task_id: str) -> bool:
+        """
+        Unregister a running task/job.
+
+        Args:
+            task_id: The task or job ID
+
+        Returns:
+            True if the task was unregistered, False if it wasn't registered
+        """
+        with cls._running_lock:
+            if task_id in cls._running_tasks:
+                cluster = cls._running_tasks[task_id]["cluster"]
+                del cls._running_tasks[task_id]
+                logger.debug(f"Unregistered running task/job {task_id} from cluster {cluster}")
+                return True
+            return False
+
+    @classmethod
+    def get_cluster_running_task_count(cls, cluster_name: str) -> int:
+        """
+        Get the number of running tasks/jobs on a specific cluster.
+
+        Args:
+            cluster_name: The cluster name
+
+        Returns:
+            The number of running tasks/jobs on the cluster
+        """
+        with cls._running_lock:
+            return sum(1 for task_info in cls._running_tasks.values()
+                      if task_info["cluster"] == cluster_name)
+
+    @classmethod
+    def is_cluster_busy(cls, cluster_name: str) -> bool:
+        """
+        Check if a cluster has any running tasks/jobs.
+
+        Args:
+            cluster_name: The cluster name
+
+        Returns:
+            True if the cluster has running tasks, False otherwise
+        """
+        return cls.get_cluster_running_task_count(cluster_name) > 0
+
+    @classmethod
+    def get_all_running_tasks(cls) -> Dict[str, Dict]:
+        """
+        Get all running tasks (for debugging/monitoring).
+
+        Returns:
+            Dictionary of running task_id -> task info
+        """
+        with cls._running_lock:
+            return cls._running_tasks.copy()

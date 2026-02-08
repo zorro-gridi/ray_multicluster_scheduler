@@ -4,6 +4,7 @@ import time
 import threading
 from typing import Dict, Optional
 from ray_multicluster_scheduler.common.logging import get_logger
+from ray_multicluster_scheduler.common.config import settings, ExecutionMode
 
 logger = get_logger(__name__)
 
@@ -80,6 +81,13 @@ class ClusterSubmissionHistory:
 
         # 如果是顶级任务，应用40秒限制
         with self._lock:
+            # 串行模式：检查是否有任务正在执行
+            if settings.EXECUTION_MODE == ExecutionMode.SERIAL:
+                from ray_multicluster_scheduler.scheduler.queue.task_queue import TaskQueue
+                if TaskQueue.is_cluster_busy(cluster_name):
+                    logger.debug(f"集群 {cluster_name} 在串行模式下繁忙，有任务正在执行")
+                    return False
+
             last_submission_time = self._last_submission_times.get(cluster_name)
 
             if last_submission_time is None:
