@@ -23,6 +23,7 @@ class JobDescription:
     # 新增字段：调度状态跟踪
     scheduling_status: str = "PENDING"  # PENDING, QUEUED, SUBMITTED, RUNNING, COMPLETED, FAILED
     actual_submission_id: Optional[str] = None  # 实际提交到Ray集群的submission_id
+    is_processing: bool = False  # 处理中标志，用于防止重复处理
 
     def __post_init__(self):
         if not self.job_id:

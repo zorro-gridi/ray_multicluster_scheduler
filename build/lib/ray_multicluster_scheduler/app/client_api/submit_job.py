@@ -29,6 +29,29 @@ _interrupted = threading.Event()
 _submitted_job_ids = []
 
 
+def update_submitted_job_id(old_job_id: str, new_actual_submission_id: str) -> bool:
+    """
+    更新已提交作业的ID。
+
+    当作业从队列中取出并实际提交到Ray集群后，需要更新已提交作业ID列表，
+    以便信号处理器和等待函数能够使用正确的submission_id来停止/查询作业。
+
+    Args:
+        old_job_id: 旧的job_id（队列中的随机ID）
+        new_actual_submission_id: 新的actual_submission_id（Ray集群返回的实际ID）
+
+    Returns:
+        True 如果更新成功，False 如果找不到对应的作业
+    """
+    global _submitted_job_ids
+    if old_job_id in _submitted_job_ids:
+        _submitted_job_ids.remove(old_job_id)
+        _submitted_job_ids.append(new_actual_submission_id)
+        logger.info(f"更新作业ID: {old_job_id} -> {new_actual_submission_id}")
+        return True
+    return False
+
+
 def initialize_scheduler(task_lifecycle_manager: TaskLifecycleManager):
     """Initialize the scheduler with a task lifecycle manager."""
     global _task_lifecycle_manager
@@ -297,12 +320,36 @@ def wait_for_all_jobs(submission_ids: list, check_interval: int = 5, timeout: Op
 
         still_running = []
 
-        for submission_id in submission_ids:
+        for original_submission_id in submission_ids:
             # 检查中断信号
             _check_interrupt()
 
-            if submission_id in completed_jobs:
+            if original_submission_id in completed_jobs:
                 continue  # 已完成的job跳过
+
+            # 尝试将 job_id 转换为实际的 actual_submission_id
+            actual_submission_id = original_submission_id
+            try:
+                scheduler = get_unified_scheduler()
+                lm = scheduler.task_lifecycle_manager
+
+                # 优先正向查找：original_submission_id 可能是 job_id
+                if hasattr(lm, 'job_id_to_actual_submission_id'):
+                    mapping = lm.job_id_to_actual_submission_id
+                    if original_submission_id in mapping:
+                        actual_submission_id = mapping[original_submission_id]
+                        logger.debug(f"正向转换作业ID: {original_submission_id} -> {actual_submission_id}")
+                    else:
+                        # 反向查找：original_submission_id 可能是 actual_submission_id
+                        for job_id, actual_id in mapping.items():
+                            if actual_id == original_submission_id:
+                                logger.debug(f"反向确认作业ID映射: {job_id} -> {original_submission_id}")
+                                break
+            except Exception:
+                pass
+
+            # 使用 actual_submission_id 进行后续操作
+            submission_id = actual_submission_id
 
             try:
                 # 首先尝试从调度器获取作业的集群信息
@@ -319,31 +366,31 @@ def wait_for_all_jobs(submission_ids: list, check_interval: int = 5, timeout: Op
                     # 如果无法获取集群信息，则需要遍历所有集群查找作业
                     status = _get_job_status_from_all_clusters(submission_id)
 
-                print(f"Job {submission_id} 状态: {status}")
+                print(f"Job {original_submission_id} 状态: {status}")
 
                 if status == "SUCCEEDED":  # 成功完成
-                    completed_jobs.add(submission_id)
-                    print(f"Job {submission_id} 已成功完成")
+                    completed_jobs.add(original_submission_id)
+                    print(f"Job {original_submission_id} 已成功完成")
                 elif status in ["FAILED", "STOPPED"]:  # 失败或被停止
-                    print(f"Job {submission_id} 执行失败，状态: {status}")
+                    print(f"Job {original_submission_id} 执行失败，状态: {status}")
                     # 尝试获取失败作业的详细信息
                     try:
                         if cluster_name:
                             job_info = get_job_info(submission_id, cluster_name)
                             if job_info:
-                                print(f"Job {submission_id} 详细信息: {job_info}")
+                                print(f"Job {original_submission_id} 详细信息: {job_info}")
                     except Exception as info_e:
-                        logger.debug(f"无法获取作业 {submission_id} 的详细信息: {info_e}")
-                    raise RuntimeError(f"Job {submission_id} 执行失败，状态: {status}")
+                        logger.debug(f"无法获取作业 {original_submission_id} 的详细信息: {info_e}")
+                    raise RuntimeError(f"Job {original_submission_id} 执行失败，状态: {status}")
                 elif status == "UNKNOWN":  # 状态未知，可能作业已不存在
-                    print(f"Job {submission_id} 状态未知，可能作业已不存在或无法找到")
+                    print(f"Job {original_submission_id} 状态未知，可能作业已不存在或无法找到")
                     # 记录为失败状态
-                    raise RuntimeError(f"Job {submission_id} 状态未知，可能作业已不存在")
+                    raise RuntimeError(f"Job {original_submission_id} 状态未知，可能作业已不存在")
                 elif status in ["QUEUED", "PENDING"]:  # 仍在队列中等待
-                    print(f"Job {submission_id} 状态: {status}，正在等待资源释放")
-                    still_running.append((submission_id, status))
+                    print(f"Job {original_submission_id} 状态: {status}，正在等待资源释放")
+                    still_running.append((original_submission_id, status))
                 else:  # 运行中或其他状态
-                    still_running.append((submission_id, status))
+                    still_running.append((original_submission_id, status))
 
             except KeyboardInterrupt:
                 # 如果收到中断信号，清理中断标志并重新抛出
@@ -351,12 +398,28 @@ def wait_for_all_jobs(submission_ids: list, check_interval: int = 5, timeout: Op
                 logger.info("等待操作被用户中断")
                 raise
             except Exception as e:
-                print(f"获取job {submission_id} 状态失败: {e}")
-                raise RuntimeError(f"无法获取job {submission_id} 的状态: {e}")
+                print(f"获取job {original_submission_id} 状态失败: {e}")
+                raise RuntimeError(f"无法获取job {original_submission_id} 的状态: {e}")
 
         if still_running:
             print(f"仍有 {len(still_running)} 个job在运行，继续等待...")
-            print(f"  运行中的job: {[submission_id for submission_id, _ in still_running]}")
+            # 显示原始ID和实际ID的对应关系
+            running_display = []
+            for orig_id, status in still_running:
+                try:
+                    scheduler = get_unified_scheduler()
+                    lm = scheduler.task_lifecycle_manager
+                    if hasattr(lm, 'job_id_to_actual_submission_id'):
+                        mapping = lm.job_id_to_actual_submission_id
+                        if orig_id in mapping:
+                            running_display.append(f"{orig_id}->{mapping[orig_id]}")
+                        else:
+                            running_display.append(orig_id)
+                    else:
+                        running_display.append(orig_id)
+                except Exception:
+                    running_display.append(orig_id)
+            print(f"  运行中的job: {running_display}")
         else:
             print("所有job都已完成！")
 

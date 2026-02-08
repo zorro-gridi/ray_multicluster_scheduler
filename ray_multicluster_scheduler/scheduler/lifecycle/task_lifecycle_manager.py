@@ -1042,6 +1042,21 @@ class TaskLifecycleManager:
             cluster_snapshots: Current cluster resource snapshots
             source_cluster_queue: Name of the cluster queue this job came from, if any
         """
+        # 检查作业是否已在运行中（串行调度保护）
+        if job_desc.actual_submission_id:
+            running_tasks = TaskQueue.get_all_running_tasks()
+            if job_desc.actual_submission_id in running_tasks:
+                logger.warning(f"作业 {job_desc.job_id} (actual: {job_desc.actual_submission_id}) 已在运行中，跳过重复处理")
+                return
+
+        # 并发保护：检查作业是否已在处理中
+        if getattr(job_desc, 'is_processing', False):
+            logger.warning(f"作业 {job_desc.job_id} 已在处理中，跳过重复执行")
+            return
+
+        # 标记作业为处理中
+        job_desc.is_processing = True
+
         try:
             # Ensure connections are initialized
             if not self._initialized:
@@ -1141,6 +1156,13 @@ class TaskLifecycleManager:
                 self.job_id_to_actual_submission_id[job_desc.job_id] = actual_submission_id
                 logger.info(f"作业 {job_desc.job_id} 在集群 {source_cluster_queue} 提交完成，实际submission_id: {actual_submission_id}")
 
+                # 更新 _submitted_job_ids 中的ID（修复排队作业ID不更新问题）
+                try:
+                    from ray_multicluster_scheduler.app.client_api import submit_job
+                    submit_job.update_submitted_job_id(job_desc.job_id, actual_submission_id)
+                except Exception as update_err:
+                    logger.warning(f"更新提交作业ID失败: {update_err}")
+
                 # 等待 Job 完成
                 logger.info(f"开始等待 Job {job_desc.job_id} 完成...")
                 final_status = self._wait_for_job_completion(job_desc, source_cluster_queue,
@@ -1201,6 +1223,13 @@ class TaskLifecycleManager:
                 self.job_id_to_actual_submission_id[job_desc.job_id] = actual_submission_id
                 logger.info(f"作业 {job_desc.job_id} 提交完成，实际submission_id: {actual_submission_id}")
 
+                # 更新 _submitted_job_ids 中的ID（修复排队作业ID不更新问题）
+                try:
+                    from ray_multicluster_scheduler.app.client_api import submit_job
+                    submit_job.update_submitted_job_id(job_desc.job_id, actual_submission_id)
+                except Exception as update_err:
+                    logger.warning(f"更新提交作业ID失败: {update_err}")
+
                 # 等待 Job 完成
                 logger.info(f"开始等待 Job {job_desc.job_id} 完成...")
                 final_status = self._wait_for_job_completion(job_desc, decision.cluster_name,
@@ -1259,6 +1288,8 @@ class TaskLifecycleManager:
             if not self._is_duplicate_job_in_tracked_list(job_desc):
                 self.queued_jobs.append(job_desc)  # Track queued jobs
         finally:
+            # 清除处理中标志
+            job_desc.is_processing = False
             # 注销运行任务（用于串行模式检查）- 确保即使发生错误也能正确注销
             if job_desc.actual_submission_id:
                 try:
