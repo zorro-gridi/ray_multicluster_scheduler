@@ -43,8 +43,8 @@ class SchedulerSettings:
         SUBMISSION_WAIT_TIME: 40秒规则 - 同一集群连续提交顶级任务的最小间隔（秒）
         RESOURCE_THRESHOLD: 资源使用率阈值（70%）
         RESOURCE_CHECK_INTERVAL: 资源检查间隔（秒）
-        JOB_COMPLETION_TIMEOUT: 等待Job完成的超时时间（秒）
-        TASK_COMPLETION_TIMEOUT: 等待Task完成的超时时间（秒）
+        JOB_COMPLETION_TIMEOUT: 等待Job退出阶段的超时时间（秒），阶段1（等待运行）不受此限制
+        TASK_COMPLETION_TIMEOUT: 等待Ray任务执行完成的超时时间（秒），用于ray.get()调用
         ACTOR_READY_TIMEOUT: 等待Actor就绪的超时时间（秒）
         DEFAULT_TASK_TIMEOUT: 默认任务超时时间（秒）
         CONNECTION_TIMEOUT: Ray连接超时时间（秒）
@@ -78,8 +78,8 @@ class SchedulerSettings:
     RESOURCE_CHECK_INTERVAL: int = 5
 
     # ==================== 超时管理常量 ====================
-    JOB_COMPLETION_TIMEOUT: float = 600.0
-    TASK_COMPLETION_TIMEOUT: float = 600.0
+    JOB_COMPLETION_TIMEOUT: float = 600.0  # 等待Job退出阶段的超时时间（秒），阶段1（等待运行）不受此限制
+    TASK_COMPLETION_TIMEOUT: float = 600.0  # 等待Ray任务执行完成的超时时间（秒），用于ray.get()调用
     ACTOR_READY_TIMEOUT: int = 300
     DEFAULT_TASK_TIMEOUT: int = 300
     CONNECTION_TIMEOUT: int = 300

@@ -1,8 +1,8 @@
 #!/bin/bash
 #
-# Knowledge Capture Hook for exception-analyzer
+# Knowledge Capture Hook for debugger
 #
-# This script is triggered when the exception-analyzer subagent completes.
+# This script is triggered when the debugger subagent completes.
 # It prompts the user to save the analysis as a knowledge base entry.
 #
 

@@ -6,7 +6,7 @@
 |------|------|----------|
 | [cluster-connection](cluster-connection/) | 集群连接类异常 | 0 |
 | [resource-scheduling](resource-scheduling/) | 资源调度类异常 | 0 |
-| [concurrency](concurrency/) | 并发执行类异常 | 0 |
+| [concurrency](concurrency/) | 并发执行类异常 | 2 |
 | [configuration](configuration/) | 配置传递类异常 | 0 |
 | [policy-engine](policy-engine/) | 策略引擎类异常 | 0 |
 | [circuit-breaker](circuit-breaker/) | 熔断器类异常 | 0 |

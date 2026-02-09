@@ -546,6 +546,82 @@ class TaskQueue:
         with self.lock:
             return [name for name, queue in self.cluster_job_queues.items() if len(queue) > 0]
 
+    # ==================== Peek 方法（查看但不取出） ====================
+
+    def get_all_global_task_ids(self) -> set:
+        """
+        获取全局队列中所有任务的ID。
+
+        Returns:
+            包含所有全局任务ID的集合
+        """
+        with self.lock:
+            return self.global_task_ids.copy()
+
+    def get_all_global_job_ids(self) -> set:
+        """
+        获取全局作业队列中所有作业的ID。
+
+        Returns:
+            包含所有全局作业ID的集合
+        """
+        with self.lock:
+            return self.global_job_ids.copy()
+
+    def peek_from_cluster(self, cluster_name: str) -> Optional[TaskDescription]:
+        """
+        查看但不取出指定集群队列的队首任务。
+
+        Args:
+            cluster_name: 集群名称
+
+        Returns:
+            队首任务描述，如果队列为空则返回 None
+        """
+        with self.lock:
+            if cluster_name in self.cluster_queues and self.cluster_queues[cluster_name]:
+                return self.cluster_queues[cluster_name][0]
+            return None
+
+    def peek_global(self) -> Optional[TaskDescription]:
+        """
+        查看但不取出全局队列的队首任务。
+
+        Returns:
+            队首任务描述，如果队列为空则返回 None
+        """
+        with self.lock:
+            if self.global_queue:
+                return self.global_queue[0]
+            return None
+
+    def peek_from_cluster_job(self, cluster_name: str) -> Optional[JobDescription]:
+        """
+        查看但不取出指定集群作业队列的队首作业。
+
+        Args:
+            cluster_name: 集群名称
+
+        Returns:
+            队首作业描述，如果队列为空则返回 None
+        """
+        with self.lock:
+            if cluster_name in self.cluster_job_queues and self.cluster_job_queues[cluster_name]:
+                return self.cluster_job_queues[cluster_name][0]
+            return None
+
+    def peek_global_job(self) -> Optional[JobDescription]:
+        """
+        查看但不取出全局作业队列的队首作业。
+
+        Returns:
+            队首作业描述，如果队列为空则返回 None
+        """
+        with self.lock:
+            if self.global_job_queue:
+                return self.global_job_queue[0]
+            return None
+
     # ==================== 运行任务管理（类方法） ====================
 
     @classmethod
@@ -612,6 +688,34 @@ class TaskQueue:
             True if the cluster has running tasks, False otherwise
         """
         return cls.get_cluster_running_task_count(cluster_name) > 0
+
+    @classmethod
+    def check_serial_mode(cls, cluster_name: str, is_top_level_task: bool = True) -> bool:
+        """
+        串行模式检查（统一检查方法）
+
+        在串行模式下，确保集群一次只执行一个顶级任务/作业。
+        此检查独立于 40 秒规则，用于严格的串行执行控制。
+
+        Args:
+            cluster_name: 集群名称
+            is_top_level_task: 是否为顶级任务（子任务不受串行模式限制）
+
+        Returns:
+            True: 集群可用，可以继续处理
+            False: 集群繁忙，需要返回队列等待
+        """
+        from ray_multicluster_scheduler.common.config import settings, ExecutionMode
+
+        if settings.EXECUTION_MODE != ExecutionMode.SERIAL:
+            return True
+
+        # 串行模式：检查是否有任务正在执行
+        if cls.is_cluster_busy(cluster_name):
+            logger.debug(f"集群 {cluster_name} 在串行模式下繁忙，有任务正在执行")
+            return False
+
+        return True
 
     @classmethod
     def get_all_running_tasks(cls) -> Dict[str, Dict]:

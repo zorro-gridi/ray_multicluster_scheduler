@@ -2,7 +2,7 @@ import ray
 import time
 import logging
 import threading
-from typing import Dict, List, Optional, Any, Callable
+from typing import Dict, List, Optional, Any, Callable, Tuple
 from ray_multicluster_scheduler.common.model import TaskDescription, ResourceSnapshot
 from ray_multicluster_scheduler.common.model.job_description import JobDescription
 from ray_multicluster_scheduler.scheduler.policy.policy_engine import PolicyEngine
@@ -399,14 +399,16 @@ class TaskLifecycleManager:
         return new_job_desc
 
     def _wait_for_job_completion(self, job_desc: JobDescription, cluster_name: str,
-                                  timeout: float = JOB_COMPLETION_TIMEOUT) -> str:
+                                  timeout: float = JOB_COMPLETION_TIMEOUT,
+                                  wait_for_running: bool = True) -> str:
         """
         等待 Job 完成（SUCCEEDED/FAILED/STOPPED）
 
         Args:
             job_desc: Job 描述对象
             cluster_name: 目标集群名称
-            timeout: 超时时间（秒）
+            timeout: 超时时间（秒）- 仅控制从达到终态到退出的等待时间
+            wait_for_running: 如果为 True，等待状态变为 RUNNING；为 False，只等待退出
 
         Returns:
             最终状态: SUCCEEDED/FAILED/STOPPED/TIMEOUT
@@ -415,8 +417,31 @@ class TaskLifecycleManager:
             logger.warning(f"Job {job_desc.job_id} 没有实际的 submission_id，无法等待完成")
             return "UNKNOWN"
 
-        start_time = time.time()
         job_client = self.connection_manager.get_job_client(cluster_name)
+
+        if wait_for_running:
+            # 阶段1：无限等待状态变为 RUNNING 或终态（不受 timeout 限制）
+            logger.info(f"开始等待 Job {job_desc.job_id} 进入运行状态...")
+            while True:
+                try:
+                    status = job_client.get_job_status(job_desc.actual_submission_id)
+                    logger.info(f"Job {job_desc.job_id} (submission_id: {job_desc.actual_submission_id}) "
+                               f"当前状态: {status}")
+
+                    if status in ["RUNNING", "SUCCEEDED", "FAILED", "STOPPED"]:
+                        logger.info(f"Job {job_desc.job_id} 已达到 {status} 状态，切换到退出等待阶段")
+                        break
+
+                    time.sleep(JOB_STATUS_CHECK_INTERVAL)
+
+                except Exception as e:
+                    logger.error(f"检查 Job {job_desc.job_id} 状态时出错: {e}")
+                    time.sleep(JOB_STATUS_CHECK_INTERVAL)
+
+        # 阶段2：等待状态变为终态（受 timeout 限制）
+        # 此时 job 已经在运行或已经完成
+        logger.info(f"开始等待 Job {job_desc.job_id} 完成退出（超时: {timeout}秒）...")
+        start_time = time.time()
 
         while time.time() - start_time < timeout:
             try:
@@ -435,7 +460,7 @@ class TaskLifecycleManager:
                 logger.error(f"检查 Job {job_desc.job_id} 状态时出错: {e}")
                 time.sleep(JOB_STATUS_CHECK_INTERVAL)
 
-        logger.warning(f"等待 Job {job_desc.job_id} 完成超时 ({timeout}秒)")
+        logger.warning(f"等待 Job {job_desc.job_id} 退出超时 ({timeout}秒)")
         return "TIMEOUT"
 
     def submit_task_and_get_future(self, task_desc: TaskDescription) -> Optional[Any]:
@@ -485,6 +510,99 @@ class TaskLifecycleManager:
                     self.task_queue.enqueue(task_desc)
             # 即使出现异常，也返回任务ID，让客户端知道任务已排队
             return task_desc.task_id
+
+    def _can_task_be_processed(self, task_desc: TaskDescription,
+                               cluster_name: str,
+                               cluster_snapshots: Dict[str, ResourceSnapshot]) -> Tuple[bool, str]:
+        """
+        检查任务是否可以在指定集群上处理（出队前检查）。
+
+        在实际出队之前预检查各项条件，避免任务出队后发现不可处理而重新入队，
+        减少不必要的队列操作开销。
+
+        Args:
+            task_desc: 任务描述
+            cluster_name: 目标集群名称
+            cluster_snapshots: 当前集群资源快照
+
+        Returns:
+            (can_process: bool, reason: str) - 是否可以处理及原因
+        """
+        # 1. 检查连接状态
+        connection_state = self.connection_manager.get_connection_state(cluster_name)
+        if connection_state not in ['connected', 'healthy']:
+            return False, f"连接状态异常 ({connection_state})"
+
+        # 2. 检查集群是否在线
+        if cluster_name not in cluster_snapshots:
+            return False, "集群不在线"
+
+        # 3. 检查资源阈值
+        snapshot = cluster_snapshots[cluster_name]
+        cpu_util = snapshot.cluster_cpu_used_cores / snapshot.cluster_cpu_total_cores if snapshot.cluster_cpu_total_cores > 0 else 0
+        mem_util = snapshot.cluster_mem_usage_percent / 100.0 if snapshot.cluster_mem_total_mb > 0 else 0
+
+        if cpu_util > self.policy_engine.RESOURCE_THRESHOLD or mem_util > self.policy_engine.RESOURCE_THRESHOLD:
+            return False, f"资源紧张 (CPU: {cpu_util:.1%}, MEM: {mem_util:.1%})"
+
+        # 4. 检查40秒规则
+        is_top_level = getattr(task_desc, 'is_top_level_task', True)
+        if is_top_level:
+            if not self.policy_engine.cluster_submission_history.is_cluster_available(cluster_name):
+                remaining = self.policy_engine.cluster_submission_history.get_remaining_wait_time(cluster_name)
+                return False, f"40秒限制，还需等待 {remaining:.1f}s"
+
+        # 5. 检查串行模式
+        from ray_multicluster_scheduler.common.config import settings, ExecutionMode
+        if settings.EXECUTION_MODE == ExecutionMode.SERIAL:
+            if TaskQueue.is_cluster_busy(cluster_name):
+                return False, "串行模式，集群繁忙"
+
+        return True, "OK"
+
+    def _can_job_be_processed(self, job_desc: JobDescription,
+                              cluster_name: str,
+                              cluster_snapshots: Dict[str, ResourceSnapshot]) -> Tuple[bool, str]:
+        """
+        检查作业是否可以在指定集群上处理（出队前检查）。
+
+        Args:
+            job_desc: 作业描述
+            cluster_name: 目标集群名称
+            cluster_snapshots: 当前集群资源快照
+
+        Returns:
+            (can_process: bool, reason: str) - 是否可以处理及原因
+        """
+        # 1. 检查连接状态
+        connection_state = self.connection_manager.get_connection_state(cluster_name)
+        if connection_state not in ['connected', 'healthy']:
+            return False, f"连接状态异常 ({connection_state})"
+
+        # 2. 检查集群是否在线
+        if cluster_name not in cluster_snapshots:
+            return False, "集群不在线"
+
+        # 3. 检查资源阈值
+        snapshot = cluster_snapshots[cluster_name]
+        cpu_util = snapshot.cluster_cpu_used_cores / snapshot.cluster_cpu_total_cores if snapshot.cluster_cpu_total_cores > 0 else 0
+        mem_util = snapshot.cluster_mem_usage_percent / 100.0 if snapshot.cluster_mem_total_mb > 0 else 0
+
+        if cpu_util > self.policy_engine.RESOURCE_THRESHOLD or mem_util > self.policy_engine.RESOURCE_THRESHOLD:
+            return False, f"资源紧张 (CPU: {cpu_util:.1%}, MEM: {mem_util:.1%})"
+
+        # 4. 检查40秒规则（作业也受40秒规则限制）
+        if not self.policy_engine.cluster_submission_history.is_cluster_available(cluster_name):
+            remaining = self.policy_engine.cluster_submission_history.get_remaining_wait_time(cluster_name)
+            return False, f"40秒限制，还需等待 {remaining:.1f}s"
+
+        # 5. 检查串行模式
+        from ray_multicluster_scheduler.common.config import settings, ExecutionMode
+        if settings.EXECUTION_MODE == ExecutionMode.SERIAL:
+            if TaskQueue.is_cluster_busy(cluster_name):
+                return False, "串行模式，集群繁忙"
+
+        return True, "OK"
 
     def _worker_loop(self):
         """Main worker loop that processes tasks and jobs from the queue."""
@@ -550,21 +668,54 @@ class TaskLifecycleManager:
                 # Check if there are any cluster-specific queues with tasks
                 cluster_queue_names = self.task_queue.get_cluster_queue_names()
 
+                # Peek-before-dequeue pattern: check if task can be processed before dequeuing
                 if cluster_queue_names:
                     # Try to get tasks from cluster queues first
                     for cluster_name in cluster_queue_names:
-                        # Try to get a task from this specific cluster queue
-                        task_desc = self.task_queue.dequeue_from_cluster(cluster_name)
-                        if task_desc:
-                            source_cluster = cluster_name
-                            break
+                        # 1. 先 peek 查看队首任务
+                        peeked_task = self.task_queue.peek_from_cluster(cluster_name)
+                        if not peeked_task:
+                            continue
 
-                # If no task from cluster queues, try global queue
+                        # 2. 检查任务是否可以处理
+                        can_process, reason = self._can_task_be_processed(
+                            peeked_task, cluster_name, cluster_snapshots
+                        )
+
+                        if can_process:
+                            # 3. 确认可处理后才出队
+                            task_desc = self.task_queue.dequeue_from_cluster(cluster_name)
+                            if task_desc:
+                                source_cluster = cluster_name
+                                break
+                        else:
+                            # 4. 不可处理，保持在队列中
+                            logger.debug(f"任务 {peeked_task.task_id} 暂不可处理: {reason}")
+                            continue
+
+                # If no task from cluster queues, try global queue with peek-before-dequeue
                 if not task_desc:
-                    task_desc = self.task_queue.dequeue()
+                    # 1. 先 peek 查看全局队首任务
+                    peeked_task = self.task_queue.peek_global()
+                    if peeked_task:
+                        # 对于全局队列任务，需要先通过 PolicyEngine 决策目标集群
+                        # 然后检查该集群是否可用
+                        decision = self.policy_engine.schedule(peeked_task)
+                        if decision and decision.cluster_name:
+                            can_process, reason = self._can_task_be_processed(
+                                peeked_task, decision.cluster_name, cluster_snapshots
+                            )
+                            if can_process:
+                                # 确认可处理后才出队
+                                task_desc = self.task_queue.dequeue_global()
+                                # source_cluster remains None for global queue tasks (will be set by _process_task)
+                            else:
+                                logger.debug(f"全局任务 {peeked_task.task_id} 暂不可处理: {reason}")
+                        else:
+                            logger.debug(f"全局任务 {peeked_task.task_id} 无可用集群")
                     # source_cluster remains None for global queue tasks
 
-                # If no tasks in task queues, try job queues
+                # If no tasks in task queues, try job queues with peek-before-dequeue
                 if not task_desc:
                     job_desc = None
                     cluster_job_queue_names = self.task_queue.get_cluster_job_queue_names()
@@ -572,19 +723,48 @@ class TaskLifecycleManager:
                     if cluster_job_queue_names:
                         # Try to get jobs from cluster job queues first
                         for cluster_name in cluster_job_queue_names:
-                            # Try to get a job from this specific cluster job queue
-                            job_desc = self.task_queue.dequeue_from_cluster_job(cluster_name)
-                            if job_desc:
-                                source_cluster = cluster_name
-                                task_type = 'job'
-                                break
+                            # 1. 先 peek 查看队首作业
+                            peeked_job = self.task_queue.peek_from_cluster_job(cluster_name)
+                            if not peeked_job:
+                                continue
 
-                    # If no job from cluster job queues, try global job queue
+                            # 2. 检查作业是否可以处理
+                            can_process, reason = self._can_job_be_processed(
+                                peeked_job, cluster_name, cluster_snapshots
+                            )
+
+                            if can_process:
+                                # 3. 确认可处理后才出队
+                                job_desc = self.task_queue.dequeue_from_cluster_job(cluster_name)
+                                if job_desc:
+                                    source_cluster = cluster_name
+                                    task_type = 'job'
+                                    break
+                            else:
+                                # 4. 不可处理，保持在队列中
+                                logger.debug(f"作业 {peeked_job.job_id} 暂不可处理: {reason}")
+                                continue
+
+                    # If no job from cluster job queues, try global job queue with peek-before-dequeue
                     if not job_desc:
-                        job_desc = self.task_queue.dequeue_job()
-                        # source_cluster remains None for global queue jobs
-                        if job_desc:
-                            task_type = 'job'
+                        # 1. 先 peek 查看全局作业队首
+                        peeked_job = self.task_queue.peek_global_job()
+                        if peeked_job:
+                            # 对于全局作业，需要先通过 PolicyEngine 决策目标集群
+                            decision = self.policy_engine.schedule_job(peeked_job)
+                            if decision and decision.cluster_name:
+                                can_process, reason = self._can_job_be_processed(
+                                    peeked_job, decision.cluster_name, cluster_snapshots
+                                )
+                                if can_process:
+                                    # 确认可处理后才出队
+                                    job_desc = self.task_queue.dequeue_global_job()
+                                    if job_desc:
+                                        task_type = 'job'
+                                else:
+                                    logger.debug(f"全局作业 {peeked_job.job_id} 暂不可处理: {reason}")
+                            else:
+                                logger.debug(f"全局作业 {peeked_job.job_id} 无可用集群")
 
                     if job_desc:
                         task_desc = job_desc
@@ -595,10 +775,12 @@ class TaskLifecycleManager:
                     continue
 
                 # Process the task or job, passing the source cluster information
-                if task_type == 'job':
+                if task_type == 'job' and isinstance(task_desc, JobDescription):
                     self._process_job(task_desc, cluster_snapshots, source_cluster)
-                else:
+                elif isinstance(task_desc, TaskDescription):
                     self._process_task(task_desc, cluster_snapshots, source_cluster)
+                else:
+                    logger.warning(f"无法识别的任务类型: {type(task_desc)}")
 
                 # 根据项目规范，调用接口后需保证最小时间间隔，避免过于频繁的调度尝试
                 # 当队列不为空时，添加短暂延迟以避免高速循环
@@ -626,48 +808,57 @@ class TaskLifecycleManager:
             if not self._initialized:
                 self._initialize_connections()
 
+            # 1. 同步清理：移除已不在实际队列中的任务
+            try:
+                global_task_ids = self.task_queue.get_all_global_task_ids()
+                self.queued_tasks = [t for t in self.queued_tasks if t.task_id in global_task_ids]
+            except Exception:
+                pass  # 忽略可能的错误
+
+            if not self.queued_tasks:
+                return
+
             # Update policy engine with current cluster metadata
             cluster_metadata = {name: info['metadata'] for name, info in cluster_info.items()}
             self.policy_engine.update_cluster_metadata(cluster_metadata)
 
             # NOTE: 移除全局 backpressure 检查
             # 直接尝试重新评估队列中的任务，PolicyEngine 会检查每个任务的可用集群
-            if self.queued_tasks:
-                logger.info(f"重新评估 {len(self.queued_tasks)} 个排队任务的调度可能性")
+            logger.info(f"重新评估 {len(self.queued_tasks)} 个排队任务的调度可能性")
 
-                # Try to reschedule some queued tasks
-                remaining_tasks = []
-                rescheduled_count = 0
+            # Try to reschedule some queued tasks
+            remaining_tasks = []
+            rescheduled_count = 0
 
-                for task_desc in self.queued_tasks:
-                    try:
-                        # Make a new scheduling decision - policy engine will fetch latest snapshots directly
-                        decision = self.policy_engine.schedule(task_desc)
+            for task_desc in self.queued_tasks:
+                try:
+                    # Make a new scheduling decision - policy engine will fetch latest snapshots directly
+                    decision = self.policy_engine.schedule(task_desc)
 
-                        if decision and decision.cluster_name:
-                            # Found a suitable cluster, process this task immediately
-                            logger.info(f"任务 {task_desc.task_id} 重新调度到集群 {decision.cluster_name}")
-                            # 重新评估的任务来自全局排队列表，没有特定的源集群
-                            self._process_task(task_desc, cluster_snapshots, None)
-                            rescheduled_count += 1
-                        else:
-                            # Still no suitable cluster, keep in queue
-                            # But make sure it's not a duplicate
-                            if task_desc not in remaining_tasks:
-                                remaining_tasks.append(task_desc)
-                    except Exception as e:
-                        logger.error(f"重新评估任务 {task_desc.task_id} 时出错: {e}")
-                        # 如果是首选集群不可用的异常，直接记录错误并重新加入队列
-                        if "不在线或无法连接" in str(e):
-                            logger.error(f"首选集群不可用，任务 {task_desc.task_id} 重新加入队列: {e}")
-                        # Task is already in queue, just add back to remaining tasks list
-                        remaining_tasks.append(task_desc)
+                    if decision and decision.cluster_name:
+                        # Found a suitable cluster, process this task immediately
+                        logger.info(f"任务 {task_desc.task_id} 重新调度到集群 {decision.cluster_name}")
+                        # 重新评估的任务来自全局排队列表，没有特定的源集群
+                        self._process_task(task_desc, cluster_snapshots, None)
+                        rescheduled_count += 1
+                    else:
+                        # Still no suitable cluster, keep in queue
+                        # But make sure it's not a duplicate
+                        if task_desc not in remaining_tasks:
+                            remaining_tasks.append(task_desc)
+                except Exception as e:
+                    logger.error(f"重新评估任务 {task_desc.task_id} 时出错: {e}")
+                    # 如果是首选集群不可用的异常，直接记录错误并重新加入队列
+                    if "不在线或无法连接" in str(e):
+                        logger.error(f"首选集群不可用，任务 {task_desc.task_id} 重新加入队列: {e}")
+                    # Task is already in queue, just add back to remaining tasks list
+                    remaining_tasks.append(task_desc)
 
-                # Update tracked queued tasks
-                self.queued_tasks = remaining_tasks
+            # Update tracked queued tasks
+            self.queued_tasks = remaining_tasks
 
-                if rescheduled_count > 0:
-                    logger.info(f"成功重新调度 {rescheduled_count} 个任务到更优集群")
+            if rescheduled_count > 0:
+                logger.info(f"成功重新调度 {rescheduled_count} 个任务到更优集群")
 
         except Exception as e:
             logger.error(f"重新评估排队任务时出错: {e}")
@@ -682,55 +873,64 @@ class TaskLifecycleManager:
             if not self._initialized:
                 self._initialize_connections()
 
+            # 1. 同步清理：移除已不在实际队列中的作业
+            try:
+                global_job_ids = self.task_queue.get_all_global_job_ids()
+                self.queued_jobs = [j for j in self.queued_jobs if j.job_id in global_job_ids]
+            except Exception:
+                pass  # 忽略可能的错误
+
+            if not self.queued_jobs:
+                return
+
             # Update policy engine with current cluster metadata
             cluster_metadata = {name: info['metadata'] for name, info in cluster_info.items()}
             self.policy_engine.update_cluster_metadata(cluster_metadata)
 
             # NOTE: 移除全局 backpressure 检查
             # 直接尝试重新评估队列中的作业，PolicyEngine 会检查每个作业的可用集群
-            if self.queued_jobs:
-                logger.info(f"重新评估 {len(self.queued_jobs)} 个排队作业的调度可能性")
+            logger.info(f"重新评估 {len(self.queued_jobs)} 个排队作业的调度可能性")
 
-                # Try to reschedule some queued jobs
-                remaining_jobs = []
-                rescheduled_count = 0
+            # Try to reschedule some queued jobs
+            remaining_jobs = []
+            rescheduled_count = 0
 
-                for job_desc in self.queued_jobs:
-                    try:
-                        # Make a new scheduling decision for job - policy engine will fetch latest snapshots directly
-                        decision = self.policy_engine.schedule_job(job_desc)
+            for job_desc in self.queued_jobs:
+                try:
+                    # Make a new scheduling decision for job - policy engine will fetch latest snapshots directly
+                    decision = self.policy_engine.schedule_job(job_desc)
 
-                        if decision and decision.cluster_name:
-                            # Found a suitable cluster, process this job immediately
-                            logger.info(f"作业 {job_desc.job_id} 重新调度到集群 {decision.cluster_name}")
-                            # 重新评估的作业来自全局排队列表，没有特定的源集群
-                            self._process_job(job_desc, cluster_snapshots, None)
-                            rescheduled_count += 1
-                        else:
-                            # Still no suitable cluster, keep in queue
-                            # But make sure it's not a duplicate
-                            if job_desc not in remaining_jobs:
-                                remaining_jobs.append(job_desc)
-                    except Exception as e:
-                        logger.error(f"重新评估作业 {job_desc.job_id} 时出错: {e}")
-                        # 如果是首选集群不可用的异常，直接记录错误并重新加入队列
-                        if "不在线或无法连接" in str(e):
-                            logger.error(f"首选集群不可用，作业 {job_desc.job_id} 重新加入队列: {e}")
-                        # Job is already in queue, just add back to remaining jobs list
-                        remaining_jobs.append(job_desc)
+                    if decision and decision.cluster_name:
+                        # Found a suitable cluster, process this job immediately
+                        logger.info(f"作业 {job_desc.job_id} 重新调度到集群 {decision.cluster_name}")
+                        # 重新评估的作业来自全局排队列表，没有特定的源集群
+                        self._process_job(job_desc, cluster_snapshots, None)
+                        rescheduled_count += 1
+                    else:
+                        # Still no suitable cluster, keep in queue
+                        # But make sure it's not a duplicate
+                        if job_desc not in remaining_jobs:
+                            remaining_jobs.append(job_desc)
+                except Exception as e:
+                    logger.error(f"重新评估作业 {job_desc.job_id} 时出错: {e}")
+                    # 如果是首选集群不可用的异常，直接记录错误并重新加入队列
+                    if "不在线或无法连接" in str(e):
+                        logger.error(f"首选集群不可用，作业 {job_desc.job_id} 重新加入队列: {e}")
+                    # Job is already in queue, just add back to remaining jobs list
+                    remaining_jobs.append(job_desc)
 
-                # Update tracked queued jobs
-                self.queued_jobs = remaining_jobs
+            # Update tracked queued jobs
+            self.queued_jobs = remaining_jobs
 
-                if rescheduled_count > 0:
-                    logger.info(f"成功重新调度 {rescheduled_count} 个作业到更优集群")
+            if rescheduled_count > 0:
+                logger.info(f"成功重新调度 {rescheduled_count} 个作业到更优集群")
 
         except Exception as e:
             logger.error(f"重新评估排队作业时出错: {e}")
             import traceback
             traceback.print_exc()
 
-    def _process_task(self, task_desc: TaskDescription, cluster_snapshots: Dict[str, ResourceSnapshot], source_cluster_queue: str = None):
+    def _process_task(self, task_desc: TaskDescription, cluster_snapshots: Dict[str, ResourceSnapshot], source_cluster_queue: Optional[str] = None):
         """Process a single task.
 
         Args:
@@ -823,6 +1023,16 @@ class TaskLifecycleManager:
                 if not self.running:
                     logger.info(f"调度器已停止，跳过任务 {task_desc.task_id} 的执行")
                     return
+
+                # 串行模式检查：确保集群可用
+                from ray_multicluster_scheduler.common.config import settings, ExecutionMode
+                if settings.EXECUTION_MODE == ExecutionMode.SERIAL:
+                    if TaskQueue.is_cluster_busy(source_cluster_queue):
+                        logger.warning(f"集群 {source_cluster_queue} 在串行模式下繁忙，任务 {task_desc.task_id} 重新入队")
+                        self.task_queue.enqueue(task_desc, source_cluster_queue)
+                        if not self._is_duplicate_task_in_tracked_list(task_desc):
+                            self.queued_tasks.append(task_desc)
+                        return
 
                 # 直接调度到指定集群
                 future = self.dispatcher.dispatch_task(task_desc, source_cluster_queue)
@@ -1028,13 +1238,16 @@ class TaskLifecycleManager:
         finally:
             # 无论任务执行成功或失败，都清除处理中标记
             task_desc.is_processing = False
+            # 从 queued_tasks 跟踪列表中移除已处理的任务（如果在队列中）
+            if task_desc in self.queued_tasks:
+                self.queued_tasks.remove(task_desc)
             # 注销运行任务（用于串行模式检查）
             try:
                 TaskQueue.unregister_running_task(task_desc.task_id)
             except Exception:
                 pass  # 忽略注销错误
 
-    def _process_job(self, job_desc: JobDescription, cluster_snapshots: Dict[str, ResourceSnapshot], source_cluster_queue: str = None):
+    def _process_job(self, job_desc: JobDescription, cluster_snapshots: Dict[str, ResourceSnapshot], source_cluster_queue: Optional[str] = None):
         """Process a single job.
 
         Args:
@@ -1135,6 +1348,16 @@ class TaskLifecycleManager:
                     logger.info(f"调度器已停止，跳过作业 {job_desc.job_id} 的执行")
                     return
 
+                # 串行模式检查：确保集群可用
+                from ray_multicluster_scheduler.common.config import settings, ExecutionMode
+                if settings.EXECUTION_MODE == ExecutionMode.SERIAL:
+                    if TaskQueue.is_cluster_busy(source_cluster_queue):
+                        logger.warning(f"集群 {source_cluster_queue} 在串行模式下繁忙，作业 {job_desc.job_id} 重新入队")
+                        self.task_queue.enqueue_job(job_desc, source_cluster_queue)
+                        if not self._is_duplicate_job_in_tracked_list(job_desc):
+                            self.queued_jobs.append(job_desc)
+                        return
+
                 # 获取目标集群的配置，用于路径转换
                 target_cluster_metadata = cluster_metadata[source_cluster_queue]
 
@@ -1163,10 +1386,11 @@ class TaskLifecycleManager:
                 except Exception as update_err:
                     logger.warning(f"更新提交作业ID失败: {update_err}")
 
-                # 等待 Job 完成
+                # 等待 Job 完成（只等待退出，不限制运行时间）
                 logger.info(f"开始等待 Job {job_desc.job_id} 完成...")
                 final_status = self._wait_for_job_completion(job_desc, source_cluster_queue,
-                                                              timeout=JOB_COMPLETION_TIMEOUT)
+                                                              timeout=JOB_COMPLETION_TIMEOUT,
+                                                              wait_for_running=True)
                 # 注销运行任务（用于串行模式检查）
                 TaskQueue.unregister_running_task(actual_submission_id)
                 job_desc.scheduling_status = final_status
@@ -1230,10 +1454,11 @@ class TaskLifecycleManager:
                 except Exception as update_err:
                     logger.warning(f"更新提交作业ID失败: {update_err}")
 
-                # 等待 Job 完成
+                # 等待 Job 完成（只等待退出，不限制运行时间）
                 logger.info(f"开始等待 Job {job_desc.job_id} 完成...")
                 final_status = self._wait_for_job_completion(job_desc, decision.cluster_name,
-                                                              timeout=JOB_COMPLETION_TIMEOUT)
+                                                              timeout=JOB_COMPLETION_TIMEOUT,
+                                                              wait_for_running=True)
                 # 注销运行任务（用于串行模式检查）
                 TaskQueue.unregister_running_task(actual_submission_id)
                 job_desc.scheduling_status = final_status
@@ -1290,6 +1515,9 @@ class TaskLifecycleManager:
         finally:
             # 清除处理中标志
             job_desc.is_processing = False
+            # 从 queued_jobs 跟踪列表中移除已处理的作业（如果在队列中）
+            if job_desc in self.queued_jobs:
+                self.queued_jobs.remove(job_desc)
             # 注销运行任务（用于串行模式检查）- 确保即使发生错误也能正确注销
             if job_desc.actual_submission_id:
                 try:

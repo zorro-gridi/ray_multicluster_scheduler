@@ -25,6 +25,31 @@ Refer to the skill's supporting documents for detailed guidance:
 - [OUTPUT_FORMAT.md](.claude/skills/error-analysis/OUTPUT_FORMAT.md) - Report format
 - [KNOWLEDGE_BASE.md](.claude/skills/error-analysis/KNOWLEDGE_BASE.md) - Knowledge base integration
 
+## Debugging Patterns
+
+When analyzing exceptions and errors, apply these established debugging patterns:
+
+### Call Chain Analysis
+Trace the error along the call stack, examining input/output at each layer:
+- Follow the stack trace from top to bottom
+- Check return values and side effects at each interface
+- Identify where the exception originates vs. where it manifests
+- Validate data transformations between layers
+
+### Parameter Loss Tracing
+Track parameter propagation through the call chain:
+- Verify parameters arrive correctly at each boundary
+- Check default values and optional parameter handling
+- Look for silent type conversions or mutations
+- Validate complex objects retain expected state
+
+### State Transition Debugging
+Debug state machine and workflow transition issues:
+- Log state transitions with triggers and conditions
+- Verify transition preconditions are correctly evaluated
+- Check concurrent access patterns for race conditions
+- Validate state consistency after each transition
+
 ## Knowledge Base Integration
 
 The project maintains an exception handling knowledge base at `.knowledge-base/exceptions/`. When analyzing:

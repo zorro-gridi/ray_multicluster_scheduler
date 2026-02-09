@@ -28,8 +28,8 @@ if [ -z "$TRANSCRIPT_PATH" ] || [ ! -f "$TRANSCRIPT_PATH" ]; then
     exit 0
 fi
 
-# Check if exception-analyzer was used
-if ! grep -q "exception-analyzer" "$TRANSCRIPT_PATH" 2>/dev/null; then
+# Check if debugger was used
+if ! grep -q "debugger" "$TRANSCRIPT_PATH" 2>/dev/null; then
     exit 0
 fi
 
